@@ -1,0 +1,43 @@
+name: AIAssistant
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Set your Apple Developer team ID here (or in Xcode after generating).
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  AIAssistant:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    dependencies:
+      - target: ScreenBroadcast
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.aiassistant
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/AIAssistant.entitlements
+
+  ScreenBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ScreenBroadcast
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.aiassistant.ScreenBroadcast
+        INFOPLIST_FILE: ScreenBroadcast/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ScreenBroadcast/ScreenBroadcast.entitlements
