@@ -1,6 +1,6 @@
 name: AIAssistant
 options:
-  bundleIdPrefix: com.example
+  bundleIdPrefix: com.manarz
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
@@ -26,7 +26,7 @@ targets:
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.aiassistant
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.aiassistant
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/AIAssistant.entitlements
 
@@ -38,6 +38,6 @@ targets:
       - Shared
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.aiassistant.ScreenBroadcast
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.aiassistant.ScreenBroadcast
         INFOPLIST_FILE: ScreenBroadcast/Info.plist
         CODE_SIGN_ENTITLEMENTS: ScreenBroadcast/ScreenBroadcast.entitlements

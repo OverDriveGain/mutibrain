@@ -8,23 +8,30 @@ struct SharedConfig {
     let token: String
 
     /// Must match the App Group in both targets' entitlements.
-    static let appGroup = "group.com.example.aiassistant"
-    static let extensionBundleID = "com.example.aiassistant.ScreenBroadcast"
+    static let appGroup = "group.com.manarz.aiassistant"
+    static let extensionBundleID = "com.manarz.aiassistant.ScreenBroadcast"
+
+    /// Shared store when the App Group is provisioned (paid team); otherwise
+    /// falls back to the process-local standard defaults so the main app still
+    /// works on a free Apple ID (the extension just can't see the app's values).
+    private static var store: UserDefaults {
+        UserDefaults(suiteName: appGroup) ?? .standard
+    }
 
     var audioURL: URL { URL(string: base.replacingOccurrences(of: "http", with: "ws") + "/v1/audio")! }
     var screenURL: URL { URL(string: base.replacingOccurrences(of: "http", with: "ws") + "/v1/screen")! }
 
     static func load() -> SharedConfig {
-        let d = UserDefaults(suiteName: appGroup)
+        let d = store
         // Default to a LAN address; change it in the app UI before first run.
-        let base = d?.string(forKey: "serverBase") ?? "ws://192.168.1.10:8000"
-        let token = d?.string(forKey: "token") ?? "dev-secret-token"
+        let base = d.string(forKey: "serverBase") ?? "ws://192.168.1.10:8000"
+        let token = d.string(forKey: "token") ?? "dev-secret-token"
         return SharedConfig(base: base, token: token)
     }
 
     static func save(base: String, token: String) {
-        let d = UserDefaults(suiteName: appGroup)
-        d?.set(base, forKey: "serverBase")
-        d?.set(token, forKey: "token")
+        let d = store
+        d.set(base, forKey: "serverBase")
+        d.set(token, forKey: "token")
     }
 }
