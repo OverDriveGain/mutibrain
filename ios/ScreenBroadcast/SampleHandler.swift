@@ -20,7 +20,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let jpegQuality: CGFloat = 0.5
     private var inFlight = false
 
-    override func broadcastStarted(withUserInfo setupInfo: [String: NSObject]?) {
+    override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         let cfg = SharedConfig.load()
         let client = WebSocketClient(url: cfg.screenURL, token: cfg.token)
         client.connect()

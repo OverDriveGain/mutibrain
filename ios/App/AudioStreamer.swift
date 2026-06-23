@@ -55,7 +55,11 @@ final class AudioStreamer: NSObject, ObservableObject {
     // MARK: - Setup
 
     private func requestMicThen(_ done: @escaping (Bool) -> Void) {
-        AVAudioApplication.requestRecordPermission { granted in done(granted) }
+        if #available(iOS 17.0, *) {
+            AVAudioApplication.requestRecordPermission { granted in done(granted) }
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in done(granted) }
+        }
     }
 
     private func configureSession() {
