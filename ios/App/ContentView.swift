@@ -15,7 +15,7 @@ struct ContentView: View {
         NavigationView {
             Form {
                 Section("Voice brain (gadk)") {
-                    TextField("https://gadk.kaxtus.com/voice", text: $gadkURL)
+                    TextField("https://agent.kaxtus.com/voice", text: $gadkURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
