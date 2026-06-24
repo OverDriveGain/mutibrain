@@ -5,11 +5,11 @@ import SwiftUI
 /// assistant (its brain). Screen+voice recording to screenpipe lives in Settings.
 struct PetView: View {
     @StateObject private var pet = PetEngine()
-    @State private var showVoice = false
+    @StateObject private var voice = VoiceState()
     @State private var showSettings = false
     @State private var bob = false
 
-    private let voiceURL = URL(string: "https://gadk.kaxtus.com/voice")!
+    private var displayMood: PetMood { voice.active ? .happy : pet.mood }
 
     var body: some View {
         ZStack {
@@ -22,12 +22,19 @@ struct PetView: View {
 
                 Spacer(minLength: 0)
 
+                // Speech bubble — words the assistant is saying
+                if voice.active && !voice.caption.isEmpty {
+                    SpeechBubble(text: voice.caption)
+                        .transition(.scale.combined(with: .opacity))
+                        .padding(.horizontal)
+                }
+
                 // Pet + reaction
                 ZStack {
-                    PixelPet(mood: pet.mood)
+                    PixelPet(mood: displayMood)
                         .frame(width: 220, height: 220)
                         .offset(y: bob ? -10 : 0)
-                        .animation(.easeInOut(duration: pet.mood == .sleepy ? 2.2 : 0.9)
+                        .animation(.easeInOut(duration: displayMood == .sleepy ? 2.2 : (voice.answering ? 0.4 : 0.9))
                                     .repeatForever(autoreverses: true), value: bob)
                         .onTapGesture { pet.pet() }
 
@@ -39,7 +46,7 @@ struct PetView: View {
                 }
                 .animation(.spring(response: 0.4, dampingFraction: 0.6), value: pet.reaction)
 
-                Text(pet.mood.label)
+                Text(voice.active ? (voice.answering ? "Talking…" : "Listening…") : displayMood.label)
                     .font(.system(.title2, design: .rounded)).bold()
                     .foregroundStyle(.primary)
 
@@ -52,8 +59,10 @@ struct PetView: View {
             .padding()
         }
         .onAppear { bob = true }
-        .sheet(isPresented: $showVoice, onDismiss: { pet.talked() }) {
-            VoiceView(url: voiceURL)
+        .animation(.spring(response: 0.4, dampingFraction: 0.7), value: voice.active)
+        .animation(.easeInOut(duration: 0.2), value: voice.caption)
+        .onChange(of: voice.active) { isActive in
+            if !isActive { pet.talked() }   // cheer up when a chat ends
         }
         .sheet(isPresented: $showSettings) { ContentView() }
     }
@@ -83,14 +92,10 @@ struct PetView: View {
 
     private var controls: some View {
         VStack(spacing: 12) {
-            Button { showVoice = true } label: {
-                Label("Talk to me", systemImage: "mic.fill")
-                    .font(.system(.headline, design: .rounded))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.indigo)
+            // The gadk voice control, inline (no popup). It IS the button.
+            VoiceBridge(url: SharedConfig.load().gadkURL, state: voice)
+                .frame(height: 62)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
 
             HStack(spacing: 12) {
                 ActionButton(title: "Feed", icon: "fork.knife") { pet.feed() }
@@ -129,6 +134,39 @@ private struct ActionButton: View {
         }
         .buttonStyle(.bordered)
         .tint(.secondary)
+    }
+}
+
+/// Comic speech bubble showing the words the assistant is currently saying.
+private struct SpeechBubble: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(.system(.callout, design: .rounded))
+            .multilineTextAlignment(.center)
+            .lineLimit(4)
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(Color(.secondarySystemBackground))
+                    .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
+            )
+            .overlay(alignment: .bottom) {
+                Triangle().fill(Color(.secondarySystemBackground))
+                    .frame(width: 18, height: 10).offset(y: 9)
+            }
+            .frame(maxWidth: 320)
+    }
+}
+
+private struct Triangle: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: r.midX, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        p.closeSubpath()
+        return p
     }
 }
 

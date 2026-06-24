@@ -8,11 +8,23 @@ struct ContentView: View {
     private var token: String = SharedConfig.defaultToken
     @AppStorage("agentId", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var agentId: String = SharedConfig.defaultAgentId
+    @AppStorage("gadkURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var gadkURL: String = SharedConfig.defaultGadk
 
     var body: some View {
         NavigationView {
             Form {
-                Section("Screenpipe server") {
+                Section("Voice brain (gadk)") {
+                    TextField("https://gadk.kaxtus.com/voice", text: $gadkURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    Text("The voice assistant the pet talks to. Restart the app after changing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Memory (screenpipe)") {
                     TextField("http://host:8090", text: $serverBase)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
