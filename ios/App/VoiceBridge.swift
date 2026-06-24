@@ -79,17 +79,19 @@ struct VoiceBridge: UIViewRepresentable {
     /// Strip the gadk page to its button, relabel it, and forward state/captions.
     private static let bridgeJS = """
     (function(){
-      var css = "html,body{background:transparent!important;margin:0;height:100%;overflow:hidden}"
+      var css = "@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');"
+        + "html,body{background:transparent!important;margin:0;height:100%;overflow:hidden}"
         + "h1,.status,.meter,#log,.hint{display:none!important}"
         + "body{display:block!important}"
         + "#talkBtn{position:fixed!important;inset:0!important;width:100%!important;height:100%!important;"
-        + "border-radius:20px!important;font-size:19px!important;box-shadow:none!important;"
-        + "background:linear-gradient(160deg,#5b54e0,#6a5cff)!important}"
-        + "#talkBtn.recording{background:linear-gradient(160deg,#ff5b6e,#ff3b5c)!important;animation:none!important}";
+        + "border-radius:0!important;border:none!important;color:#fff!important;"
+        + "font-family:'Press Start 2P',monospace!important;font-size:12px!important;letter-spacing:0!important;text-transform:uppercase!important;"
+        + "background:#6a5cff!important;box-shadow:inset 3px 3px 0 #8a7dff, inset -3px -3px 0 #4e40d8!important}"
+        + "#talkBtn.recording{background:#ff3b5c!important;box-shadow:inset 3px 3px 0 #ff7d8f, inset -3px -3px 0 #d81f3c!important;animation:none!important}";
       var s=document.createElement('style'); s.textContent=css; document.head.appendChild(s);
       function post(o){ try{ window.webkit.messageHandlers.petbridge.postMessage(o); }catch(e){} }
       var btn=document.getElementById('talkBtn');
-      function relabel(){ if(btn){ btn.textContent = btn.classList.contains('recording') ? 'Listening… tap to stop' : 'Talk to me'; } }
+      function relabel(){ if(btn){ btn.textContent = btn.classList.contains('recording') ? 'Tap to stop' : 'Talk to me'; } }
       relabel();
       if(btn){ new MutationObserver(function(){ relabel(); post({type:'rec', on: btn.classList.contains('recording')}); })
         .observe(btn,{attributes:true,attributeFilter:['class']}); }

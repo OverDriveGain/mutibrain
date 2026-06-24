@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The Tamagotchi home screen. A pixel pet that idles, shows moods, and reacts
-/// to taps; you Feed/Rest it (scripted) and tap "Talk" to open the gadk voice
-/// assistant (its brain). Screen+voice recording to screenpipe lives in Settings.
+/// The Tamagotchi home screen — pixel pet living in a little room. Tap the pet to
+/// play; Feed/Rest care for it; "Talk to me" runs gadk inline (the pet's brain)
+/// and a speech bubble shows what it says. Screen+voice recording lives in Settings.
 struct PetView: View {
     @StateObject private var pet = PetEngine()
     @StateObject private var voice = VoiceState()
@@ -13,259 +13,266 @@ struct PetView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(.systemIndigo).opacity(0.20), Color(.systemBackground)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
+            RoomBackground().ignoresSafeArea()
 
-            VStack(spacing: 18) {
+            VStack(spacing: 16) {
                 header
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
 
-                // Speech bubble — words the assistant is saying
                 if voice.active && !voice.caption.isEmpty {
                     SpeechBubble(text: voice.caption)
                         .transition(.scale.combined(with: .opacity))
-                        .padding(.horizontal)
                 }
 
-                // Pet + reaction
+                // pet + ground shadow + reaction
                 ZStack {
-                    PixelPet(mood: displayMood)
-                        .frame(width: 220, height: 220)
+                    Ellipse().fill(PX.ink.opacity(0.18))
+                        .frame(width: 150, height: 26).offset(y: 116)
+                    PixelPet(mood: displayMood, lively: voice.answering)
+                        .frame(width: 230, height: 230)
                         .offset(y: bob ? -10 : 0)
-                        .animation(.easeInOut(duration: displayMood == .sleepy ? 2.2 : (voice.answering ? 0.4 : 0.9))
+                        .animation(.easeInOut(duration: displayMood == .sleepy ? 2.4 : (voice.answering ? 0.45 : 1.0))
                                     .repeatForever(autoreverses: true), value: bob)
                         .onTapGesture { pet.pet() }
-
                     if let r = pet.reaction {
-                        Text(r).font(.system(size: 44))
-                            .offset(y: -120)
+                        Text(r).font(.system(size: 40)).offset(y: -130)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
                 .animation(.spring(response: 0.4, dampingFraction: 0.6), value: pet.reaction)
 
-                Text(voice.active ? (voice.answering ? "Talking…" : "Listening…") : displayMood.label)
-                    .font(.system(.title2, design: .rounded)).bold()
-                    .foregroundStyle(.primary)
+                Text((voice.active ? (voice.answering ? "TALKING" : "LISTENING") : displayMood.label).uppercased())
+                    .font(.pixel(13)).foregroundStyle(PX.ink)
+                    .padding(.top, 4)
 
-                stats
+                Spacer(minLength: 4)
 
-                Spacer(minLength: 0)
+                PixelPanel {
+                    VStack(spacing: 9) {
+                        PixelStatBar(icon: "heart.fill", tint: PX.heart, value: pet.happiness)
+                        PixelStatBar(icon: "bolt.fill", tint: PX.bolt, value: pet.energy)
+                        PixelStatBar(icon: "fork.knife", tint: PX.food, value: pet.fullness)
+                    }
+                }
+                .frame(maxWidth: 320)
 
                 controls
             }
-            .padding()
+            .padding(.horizontal, 18)
+            .padding(.bottom, 8)
         }
         .onAppear { bob = true }
         .animation(.spring(response: 0.4, dampingFraction: 0.7), value: voice.active)
         .animation(.easeInOut(duration: 0.2), value: voice.caption)
-        .onChange(of: voice.active) { isActive in
-            if !isActive { pet.talked() }   // cheer up when a chat ends
-        }
+        .onChange(of: voice.active) { isActive in if !isActive { pet.talked() } }
         .sheet(isPresented: $showSettings) { ContentView() }
     }
 
     private var header: some View {
         HStack {
-            Text("AI Buddy")
-                .font(.system(.headline, design: .rounded))
-                .foregroundStyle(.secondary)
+            Text("AI BUDDY").font(.pixel(13)).foregroundStyle(PX.ink)
             Spacer()
             Button { showSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
+                Image(systemName: "gearshape.fill").font(.title3).foregroundStyle(PX.ink.opacity(0.8))
             }
         }
-    }
-
-    private var stats: some View {
-        VStack(spacing: 8) {
-            StatBar(icon: "heart.fill", tint: .pink, value: pet.happiness)
-            StatBar(icon: "bolt.fill", tint: .yellow, value: pet.energy)
-            StatBar(icon: "fork.knife", tint: .orange, value: pet.fullness)
-        }
-        .frame(maxWidth: 280)
+        .padding(.top, 4)
     }
 
     private var controls: some View {
-        VStack(spacing: 12) {
-            // The gadk voice control, inline (no popup). It IS the button.
+        VStack(spacing: 10) {
             VoiceBridge(url: SharedConfig.load().gadkURL, state: voice)
-                .frame(height: 62)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-
-            HStack(spacing: 12) {
-                ActionButton(title: "Feed", icon: "fork.knife") { pet.feed() }
-                ActionButton(title: "Rest", icon: "moon.zzz.fill") { pet.rest() }
+                .frame(height: 60)
+                .overlay(Rectangle().stroke(PX.ink, lineWidth: 3))   // pixel frame
+            HStack(spacing: 10) {
+                PixelButton(title: "FEED", icon: "fork.knife", fill: PX.cream) { pet.feed() }
+                PixelButton(title: "REST", icon: "moon.zzz.fill", fill: PX.cream) { pet.rest() }
             }
         }
         .frame(maxWidth: 360)
     }
 }
 
-private struct StatBar: View {
-    let icon: String; let tint: Color; let value: Double
+// MARK: - Room
+
+private struct RoomBackground: View {
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon).foregroundStyle(tint).frame(width: 22)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
-                    Capsule().fill(tint)
-                        .frame(width: max(6, geo.size.width * value))
+        GeometryReader { geo in
+            let floorY = geo.size.height * 0.66
+            ZStack(alignment: .topLeading) {
+                Rectangle().fill(PX.wall)                                  // wall
+                // window (top corner, behind the pet)
+                ZStack {
+                    Rectangle().fill(PX.ink).frame(width: 92, height: 92)
+                    Rectangle().fill(Color(hex: 0xBFE3FF)).frame(width: 80, height: 80)
+                    Rectangle().fill(PX.ink).frame(width: 5, height: 80)
+                    Rectangle().fill(PX.ink).frame(width: 80, height: 5)
+                }
+                .position(x: geo.size.width * 0.80, y: geo.size.height * 0.17)
+                // floor
+                Rectangle().fill(PX.floor)
+                    .frame(height: geo.size.height - floorY)
+                    .offset(y: floorY)
+                // baseboard
+                Rectangle().fill(PX.ink).frame(height: 4).offset(y: floorY - 2)
+                // floor planks
+                ForEach(1..<5) { i in
+                    Rectangle().fill(PX.floorDk.opacity(0.6)).frame(height: 2)
+                        .offset(y: floorY + CGFloat(i) * (geo.size.height - floorY) / 5)
                 }
             }
-            .frame(height: 10)
         }
     }
 }
 
-private struct ActionButton: View {
-    let title: String; let icon: String; let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.system(.subheadline, design: .rounded))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-        }
-        .buttonStyle(.bordered)
-        .tint(.secondary)
-    }
-}
+// MARK: - Speech bubble
 
-/// Comic speech bubble showing the words the assistant is currently saying.
 private struct SpeechBubble: View {
     let text: String
     var body: some View {
         Text(text)
-            .font(.system(.callout, design: .rounded))
-            .multilineTextAlignment(.center)
-            .lineLimit(4)
+            .font(.system(.callout, design: .rounded)).bold()
+            .foregroundStyle(PX.ink)
+            .multilineTextAlignment(.center).lineLimit(4)
             .padding(.horizontal, 16).padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 18)
-                    .fill(Color(.secondarySystemBackground))
-                    .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
+                ZStack {
+                    Rectangle().fill(PX.ink)
+                    Rectangle().fill(PX.white).padding(3)
+                }
             )
             .overlay(alignment: .bottom) {
-                Triangle().fill(Color(.secondarySystemBackground))
-                    .frame(width: 18, height: 10).offset(y: 9)
+                Rectangle().fill(PX.white).frame(width: 16, height: 12)
+                    .overlay(Rectangle().fill(PX.ink).frame(width: 16, height: 3), alignment: .bottom)
+                    .offset(y: 11)
             }
-            .frame(maxWidth: 320)
+            .frame(maxWidth: 300)
     }
 }
 
-private struct Triangle: Shape {
-    func path(in r: CGRect) -> Path {
-        var p = Path()
-        p.move(to: CGPoint(x: r.midX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
-        p.closeSubpath()
-        return p
-    }
-}
+// MARK: - The pixel creature (procedural, shaded, expressive)
 
-// MARK: - The pixel creature
-
-/// A small procedurally-drawn pixel pet. The body is an ellipse rasterised onto
-/// a 16×16 grid; ears/eyes/mouth/cheeks are placed per cell and vary by mood.
 struct PixelPet: View {
     let mood: PetMood
-    private let n = 16
+    var lively: Bool = false
+    private let n = 32
 
     var body: some View {
-        Canvas { ctx, size in
-            let cell = min(size.width, size.height) / Double(n)
-            func fill(_ c: Int, _ r: Int, _ color: Color) {
-                guard c >= 0, r >= 0, c < n, r < n else { return }
-                let rect = CGRect(x: Double(c) * cell, y: Double(r) * cell,
-                                  width: cell + 0.6, height: cell + 0.6)
-                ctx.fill(Path(rect), with: .color(color))
-            }
-
-            // ----- body cells (ellipse) + ears -----
-            var cells = Set<[Int]>()
-            for r in 0..<n {
-                for c in 0..<n {
-                    let dx = (Double(c) + 0.5 - 8.0) / 6.3
-                    let dy = (Double(r) + 0.5 - 8.8) / 6.0
-                    if dx * dx + dy * dy <= 1 { cells.insert([c, r]) }
-                }
-            }
-            let ears: [[Int]] = [[4,1],[3,2],[4,2],[5,2], [11,1],[12,2],[11,2],[10,2]]
-            ears.forEach { cells.insert($0) }
-
-            // ----- draw body + outline -----
-            for cell0 in cells {
-                let c = cell0[0], r = cell0[1]
-                let edge = [[c-1,r],[c+1,r],[c,r-1],[c,r+1]].contains { !cells.contains($0) }
-                fill(c, r, edge ? Self.outline : bodyColor)
-            }
-            // inner ear pink
-            [[4,2],[11,2]].forEach { fill($0[0], $0[1], Self.pink) }
-
-            // ----- face per mood -----
-            switch mood {
-            case .happy:
-                // ^  ^ happy eyes
-                fill(5,7,Self.dark); fill(6,8,Self.dark)
-                fill(10,7,Self.dark); fill(9,8,Self.dark)
-                // smile
-                fill(6,11,Self.dark); fill(7,12,Self.dark); fill(8,12,Self.dark); fill(9,11,Self.dark)
-                // cheeks
-                fill(4,10,Self.pink); fill(11,10,Self.pink)
-            case .neutral:
-                openEye(5, fill); openEye(9, fill)
-                fill(7,12,Self.dark); fill(8,12,Self.dark)
-            case .bored:
-                // half-lidded flat eyes
-                fill(5,8,Self.dark); fill(6,8,Self.dark)
-                fill(9,8,Self.dark); fill(10,8,Self.dark)
-                // flat mouth
-                fill(6,12,Self.dark); fill(7,12,Self.dark); fill(8,12,Self.dark); fill(9,12,Self.dark)
-            case .hungry:
-                openEye(5, fill); openEye(9, fill)
-                // little 'o' mouth
-                fill(7,11,Self.dark); fill(8,11,Self.dark); fill(7,12,Self.dark); fill(8,12,Self.dark)
-                // sweat drop
-                fill(12,7,Self.sweat); fill(12,8,Self.sweat)
-            case .sleepy:
-                // closed eyes
-                fill(5,8,Self.dark); fill(6,8,Self.dark)
-                fill(9,8,Self.dark); fill(10,8,Self.dark)
-                fill(7,12,Self.dark)
-                // zzz
-                fill(13,4,Self.dark); fill(14,4,Self.dark); fill(14,5,Self.dark); fill(13,6,Self.dark); fill(14,6,Self.dark)
-            }
+        TimelineView(.animation) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            let blink = t.truncatingRemainder(dividingBy: 3.4) < 0.13
+            Canvas { ctx, size in draw(into: ctx, size: size, blink: blink) }
         }
     }
 
-    private func openEye(_ col: Int, _ fill: (Int, Int, Color) -> Void) {
-        fill(col, 7, Self.dark); fill(col + 1, 7, Self.dark)
-        fill(col, 8, Self.dark); fill(col + 1, 8, Self.dark)
-        fill(col, 7, Self.dark); fill(col + 1, 7, Self.white)   // highlight
+    private func draw(into ctx: GraphicsContext, size: CGSize, blink: Bool) {
+        let cell = min(size.width, size.height) / Double(n)
+        func f(_ c: Int, _ r: Int, _ color: Color) {
+            guard c >= 0, r >= 0, c < n, r < n else { return }
+            ctx.fill(Path(CGRect(x: Double(c) * cell, y: Double(r) * cell,
+                                 width: cell + 0.6, height: cell + 0.6)), with: .color(color))
+        }
+
+        let base = bodyColor, hi = base.lighter, sh = base.darker
+
+        // ---- silhouette: body blob + ears + feet ----
+        let cx = 16.0, cy = 17.6, rx = 11.0, ry = 10.6, p = 2.4
+        func inBody(_ c: Int, _ r: Int) -> Bool {
+            let dx = (Double(c) + 0.5 - cx) / rx, dy = (Double(r) + 0.5 - cy) / ry
+            return pow(abs(dx), p) + pow(abs(dy), p) <= 1
+        }
+        func inEar(_ c: Int, _ r: Int, _ center: Double) -> Bool {
+            guard r >= 2, r <= 9 else { return false }
+            let half = Double(r - 2) * 0.85
+            return Double(c) >= center - half && Double(c) <= center + half
+        }
+        func inFoot(_ c: Int, _ r: Int, _ fx: Double) -> Bool {
+            let dx = (Double(c) + 0.5 - fx) / 3.0, dy = (Double(r) + 0.5 - 28.0) / 2.4
+            return dx * dx + dy * dy <= 1
+        }
+        var solid = Set<[Int]>()
+        for r in 0..<n { for c in 0..<n {
+            if inBody(c, r) || inEar(c, r, 9.5) || inEar(c, r, 22.5)
+                || inFoot(c, r, 11.0) || inFoot(c, r, 21.0) { solid.insert([c, r]) }
+        }}
+
+        // ---- shade body ----
+        for cellp in solid {
+            let c = cellp[0], r = cellp[1]
+            let edge = [[c-1,r],[c+1,r],[c,r-1],[c,r+1]].contains { !solid.contains($0) }
+            if edge { f(c, r, PX.ink); continue }
+            let light = -(((Double(c) - cx) / rx) + ((Double(r) - cy) / ry))
+            if light > 0.62 { f(c, r, hi) }
+            else if light < -0.7 { f(c, r, sh) }
+            else { f(c, r, base) }
+        }
+        // top-left sparkle highlight
+        [[10,9],[11,9],[10,10]].forEach { f($0[0], $0[1], hi.lighter) }
+        // inner ears (blush)
+        [[9,7],[10,7],[9,8], [22,7],[23,7],[23,8]].forEach { f($0[0], $0[1], PX.blush) }
+
+        // ---- face ----
+        let cheeks = (mood == .happy || mood == .neutral)
+        if cheeks { [[9,20],[8,20], [23,20],[24,20]].forEach { f($0[0], $0[1], PX.blush) } }
+
+        if blink && mood != .sleepy {
+            closedEye(11, f); closedEye(20, f)
+        } else {
+            switch mood {
+            case .happy:   smileEye(11, f); smileEye(20, f)
+            case .neutral, .hungry: openEye(10, f); openEye(19, f)
+            case .bored:   sleepyLid(11, f); sleepyLid(20, f)
+            case .sleepy:  closedEye(11, f); closedEye(20, f)
+            }
+        }
+
+        // mouth
+        switch mood {
+        case .happy:
+            f(14,22,PX.ink); f(15,23,PX.ink); f(16,23,PX.ink); f(17,23,PX.ink); f(18,22,PX.ink)
+        case .neutral:
+            f(15,22,PX.ink); f(16,23,PX.ink); f(17,22,PX.ink)            // :3 cat mouth
+        case .bored:
+            f(14,23,PX.ink); f(15,23,PX.ink); f(16,23,PX.ink); f(17,23,PX.ink)
+        case .hungry:
+            f(15,22,PX.ink); f(16,22,PX.ink); f(17,22,PX.ink)
+            f(15,23,PX.heart); f(16,23,PX.heart); f(17,23,PX.heart)      // open / tongue
+            f(24,15,Color(hex: 0x7FC7FF)); f(24,16,Color(hex: 0x7FC7FF)) // sweat
+        case .sleepy:
+            f(16,23,PX.ink)
+            // zzz
+            [[26,5],[27,5],[27,6],[26,7],[27,7]].forEach { f($0[0], $0[1], PX.ink) }
+        }
+    }
+
+    // eye styles (center column of a ~3-wide eye)
+    private func openEye(_ c: Int, _ f: (Int, Int, Color) -> Void) {
+        for x in c...(c+2) { for y in 15...18 { f(x, y, PX.white) } }
+        for x in c...(c+2) { f(x, 15, PX.ink) }                 // top lid
+        f(c+1, 17, PX.ink); f(c+2, 17, PX.ink); f(c+1, 18, PX.ink); f(c+2, 18, PX.ink) // pupil
+        f(c, 16, PX.white)                                       // shine
+    }
+    private func smileEye(_ c: Int, _ f: (Int, Int, Color) -> Void) {
+        f(c, 17, PX.ink); f(c+1, 16, PX.ink); f(c+2, 17, PX.ink)   // ∪ happy
+    }
+    private func sleepyLid(_ c: Int, _ f: (Int, Int, Color) -> Void) {
+        f(c, 16, PX.ink); f(c+1, 16, PX.ink); f(c+2, 16, PX.ink)
+        f(c+1, 17, PX.ink)
+    }
+    private func closedEye(_ c: Int, _ f: (Int, Int, Color) -> Void) {
+        f(c, 17, PX.ink); f(c+1, 17, PX.ink); f(c+2, 17, PX.ink)
     }
 
     private var bodyColor: Color {
         switch mood {
-        case .happy:   return Color(red: 0.55, green: 0.82, blue: 0.45)
-        case .neutral: return Color(red: 0.40, green: 0.75, blue: 0.78)
-        case .bored:   return Color(red: 0.56, green: 0.60, blue: 0.70)
-        case .hungry:  return Color(red: 0.93, green: 0.66, blue: 0.34)
-        case .sleepy:  return Color(red: 0.62, green: 0.56, blue: 0.82)
+        case .happy:   return Color(hex: 0x7BD66A)
+        case .neutral: return Color(hex: 0x46C0C6)
+        case .bored:   return Color(hex: 0x8A93BF)
+        case .hungry:  return Color(hex: 0xEFA85A)
+        case .sleepy:  return Color(hex: 0x9A86E0)
         }
     }
-
-    private static let outline = Color(red: 0.16, green: 0.17, blue: 0.24)
-    private static let dark = Color(red: 0.12, green: 0.12, blue: 0.16)
-    private static let white = Color.white
-    private static let pink = Color(red: 0.98, green: 0.62, blue: 0.66)
-    private static let sweat = Color(red: 0.45, green: 0.78, blue: 0.98)
 }
 
 #Preview { PetView() }
