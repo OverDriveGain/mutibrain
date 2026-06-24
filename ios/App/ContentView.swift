@@ -3,19 +3,27 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var audio = AudioStreamer()
     @AppStorage("serverBase", store: UserDefaults(suiteName: SharedConfig.appGroup))
-    private var serverBase: String = "ws://192.168.1.10:8000"
+    private var serverBase: String = SharedConfig.defaultBase
     @AppStorage("token", store: UserDefaults(suiteName: SharedConfig.appGroup))
-    private var token: String = "dev-secret-token"
+    private var token: String = SharedConfig.defaultToken
+    @AppStorage("agentId", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var agentId: String = SharedConfig.defaultAgentId
 
     var body: some View {
         NavigationView {
             Form {
-                Section("Server") {
-                    TextField("ws://host:port", text: $serverBase)
+                Section("Screenpipe server") {
+                    TextField("http://host:8090", text: $serverBase)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    SecureField("Token", text: $token)
+                    TextField("agent id", text: $agentId)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    SecureField("Agent token (spk_…)", text: $token)
+                    Text("Screen capture runs in a separate process and uses the values built into the app; these fields are a convenience and apply to the app only.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Microphone") {
@@ -46,7 +54,7 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Text("Mic keeps streaming while backgrounded or locked. Screen capture pauses only when the display is fully off (nothing is being rendered).")
+                    Text("Start Broadcast to stream whole-device screen frames to screenpipe (the server OCRs + indexes them for search). Capture continues across other apps and pauses only when the display is fully off. Microphone → screenpipe audio is coming next.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

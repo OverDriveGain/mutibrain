@@ -4,7 +4,7 @@ import SwiftUI
 struct AIAssistantApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            PetView()
         }
     }
 }
