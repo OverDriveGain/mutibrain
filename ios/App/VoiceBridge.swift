@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AVFoundation
 
 /// Shared state the pet reacts to while a voice session is live.
 final class VoiceState: ObservableObject {
@@ -54,16 +55,30 @@ struct VoiceBridge: UIViewRepresentable {
             decisionHandler(.grant)
         }
 
+        /// gadk's getUserMedia puts the session in call-mode → output defaults to
+        /// the earpiece. Force it to the loudspeaker so the assistant is audible.
+        private func routeToSpeaker() {
+            let s = AVAudioSession.sharedInstance()
+            try? s.setCategory(.playAndRecord, mode: .default,
+                               options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
+            try? s.setActive(true)
+            try? s.overrideOutputAudioPort(.speaker)
+        }
+
         func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
             guard let d = msg.body as? [String: Any], let type = d["type"] as? String else { return }
             DispatchQueue.main.async {
                 switch type {
                 case "rec":
-                    self.state.active = (d["on"] as? Bool) ?? false
-                    if !self.state.active { self.state.caption = ""; self.state.answering = false }
+                    let on = (d["on"] as? Bool) ?? false
+                    self.state.active = on
+                    if on { self.routeToSpeaker() }
+                    else { self.state.caption = ""; self.state.answering = false }
                 case "status":
                     let t = (d["text"] as? String ?? "")
-                    self.state.answering = t.contains("Answering")
+                    let nowAnswering = t.contains("Answering")
+                    if nowAnswering && !self.state.answering { self.routeToSpeaker() }
+                    self.state.answering = nowAnswering
                 case "caption":
                     if (d["who"] as? String) == "agent" {
                         var t = d["text"] as? String ?? ""
