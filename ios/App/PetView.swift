@@ -14,6 +14,8 @@ struct PetView: View {
     var body: some View {
         ZStack {
             RoomBackground().ignoresSafeArea()
+            DustMotes().ignoresSafeArea().allowsHitTesting(false)
+            Vignette().ignoresSafeArea().allowsHitTesting(false)
 
             VStack(spacing: 16) {
                 header
@@ -25,10 +27,12 @@ struct PetView: View {
                         .transition(.scale.combined(with: .opacity))
                 }
 
-                // pet + ground shadow + reaction
+                // pet + rug + reaction
                 ZStack {
-                    Ellipse().fill(PX.ink.opacity(0.18))
-                        .frame(width: 150, height: 26).offset(y: 116)
+                    Rug().frame(width: 178, height: 54).offset(y: 122)
+                    Ellipse().fill(PX.ink.opacity(0.16))
+                        .frame(width: 132, height: 20).offset(y: 116)
+                    if displayMood == .happy { Sparkles() }
                     PixelPet(mood: displayMood, lively: voice.answering)
                         .frame(width: 230, height: 230)
                         .offset(y: bob ? -10 : 0)
@@ -99,30 +103,145 @@ struct PetView: View {
 private struct RoomBackground: View {
     var body: some View {
         GeometryReader { geo in
-            let floorY = geo.size.height * 0.66
+            let W = geo.size.width, H = geo.size.height
+            let floorY = H * 0.66
             ZStack(alignment: .topLeading) {
-                Rectangle().fill(PX.wall)                                  // wall
-                // window (top corner, behind the pet)
-                ZStack {
-                    Rectangle().fill(PX.ink).frame(width: 92, height: 92)
-                    Rectangle().fill(Color(hex: 0xBFE3FF)).frame(width: 80, height: 80)
-                    Rectangle().fill(PX.ink).frame(width: 5, height: 80)
-                    Rectangle().fill(PX.ink).frame(width: 80, height: 5)
-                }
-                .position(x: geo.size.width * 0.80, y: geo.size.height * 0.17)
+                LinearGradient(colors: [PX.wall.lighter, PX.wall], startPoint: .top, endPoint: .bottom)
+                // dado rail (darker lower wall band)
+                Rectangle().fill(PX.wallDk).frame(height: 54).offset(y: floorY - 54)
+                Rectangle().fill(PX.ink.opacity(0.4)).frame(height: 3).offset(y: floorY - 54)
+
+                PixelWindow().frame(width: 96, height: 104).position(x: W * 0.79, y: H * 0.155)
+                PictureFrame().frame(width: 58, height: 66).position(x: W * 0.20, y: H * 0.14)
+                ShelfPlant().frame(width: 70, height: 56).position(x: W * 0.18, y: H * 0.40)
+
                 // floor
-                Rectangle().fill(PX.floor)
-                    .frame(height: geo.size.height - floorY)
-                    .offset(y: floorY)
-                // baseboard
+                Rectangle().fill(PX.floor).frame(height: H - floorY).offset(y: floorY)
                 Rectangle().fill(PX.ink).frame(height: 4).offset(y: floorY - 2)
-                // floor planks
                 ForEach(1..<5) { i in
-                    Rectangle().fill(PX.floorDk.opacity(0.6)).frame(height: 2)
-                        .offset(y: floorY + CGFloat(i) * (geo.size.height - floorY) / 5)
+                    Rectangle().fill(PX.floorDk.opacity(0.5)).frame(height: 2)
+                        .offset(y: floorY + CGFloat(i) * (H - floorY) / 5)
+                }
+                ForEach(0..<6) { i in
+                    Rectangle().fill(PX.floorDk.opacity(0.35)).frame(width: 2, height: (H - floorY) / 2)
+                        .offset(x: CGFloat(i) * W / 6 + (i.isMultiple(of: 2) ? 0 : W / 12), y: floorY)
                 }
             }
         }
+    }
+}
+
+private struct PixelWindow: View {
+    var body: some View {
+        ZStack {
+            Rectangle().fill(PX.ink)
+            ZStack {
+                LinearGradient(colors: [Color(hex: 0xAEE0FF), Color(hex: 0xE3F4FF)],
+                               startPoint: .top, endPoint: .bottom)
+                Circle().fill(Color(hex: 0xFFD86B)).frame(width: 20, height: 20).offset(x: 20, y: -22)
+                HStack(spacing: -7) {
+                    Circle().fill(.white).frame(width: 14, height: 14)
+                    Circle().fill(.white).frame(width: 20, height: 20)
+                    Circle().fill(.white).frame(width: 14, height: 14)
+                }.offset(x: -8, y: 16)
+                Rectangle().fill(PX.ink).frame(width: 4)
+                Rectangle().fill(PX.ink).frame(height: 4)
+            }
+            .padding(6).clipped()
+        }
+    }
+}
+
+private struct PictureFrame: View {
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color(hex: 0x8A6B4A))
+            VStack(spacing: 0) {
+                Color(hex: 0xBFE3FF)
+                Color(hex: 0x86C66A).frame(height: 22)
+            }
+            .overlay(Circle().fill(Color(hex: 0xFFD86B)).frame(width: 12, height: 12).offset(x: -12, y: -10))
+            .padding(6).clipped()
+        }
+    }
+}
+
+private struct ShelfPlant: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                HStack(spacing: -8) {
+                    Circle().fill(Color(hex: 0x5FA85A)).frame(width: 20, height: 22)
+                    Circle().fill(Color(hex: 0x6FBE63)).frame(width: 26, height: 30).offset(y: -6)
+                    Circle().fill(Color(hex: 0x5FA85A)).frame(width: 20, height: 22)
+                }
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color(hex: 0xC8744A)).frame(width: 30, height: 22)
+                        .overlay(Rectangle().stroke(PX.ink, lineWidth: 2))
+                }
+            }
+            Rectangle().fill(Color(hex: 0x9A7250)).frame(height: 7)
+                .overlay(Rectangle().fill(PX.ink).frame(height: 2), alignment: .bottom)
+        }
+    }
+}
+
+private struct Rug: View {
+    var body: some View {
+        ZStack {
+            Ellipse().fill(Color(hex: 0xD9694F))
+            Ellipse().fill(Color(hex: 0xEC9079)).padding(7)
+            Ellipse().fill(Color(hex: 0xD9694F)).padding(15)
+            Ellipse().strokeBorder(PX.ink.opacity(0.45), lineWidth: 2)
+        }
+    }
+}
+
+private struct Sparkles: View {
+    static let star = ["..o..", ".ooo.", "ooooo", ".ooo.", "..o.."]
+    private let pal: [Character: Color] = ["o": Color(hex: 0xFFF1A8)]
+    var body: some View {
+        TimelineView(.animation) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            ZStack {
+                twinkle(CGSize(width: -90, height: -80), t)
+                twinkle(CGSize(width: 96, height: -44), t + 1.3)
+                twinkle(CGSize(width: 74, height: 70), t + 2.1)
+            }
+        }
+    }
+    private func twinkle(_ o: CGSize, _ phase: Double) -> some View {
+        let tw = (sin(phase * 2.2) + 1) / 2
+        return PixelSprite(rows: Sparkles.star, palette: pal)
+            .frame(width: 16, height: 16)
+            .opacity(0.25 + 0.65 * tw)
+            .scaleEffect(0.7 + 0.3 * tw)
+            .offset(o)
+    }
+}
+
+private struct DustMotes: View {
+    var body: some View {
+        TimelineView(.animation) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            Canvas { ctx, size in
+                for i in 0..<16 {
+                    let s = Double(i)
+                    let x = (sin(s * 12.9 + t * 0.04) * 0.5 + 0.5) * size.width
+                    let y = (s / 16 * size.height + t * 7).truncatingRemainder(dividingBy: size.height)
+                    let a = 0.05 + 0.06 * (sin(t * 0.5 + s) * 0.5 + 0.5)
+                    ctx.fill(Path(CGRect(x: x, y: y, width: 3, height: 3)), with: .color(.white.opacity(a)))
+                }
+            }
+        }
+    }
+}
+
+private struct Vignette: View {
+    var body: some View {
+        RadialGradient(colors: [.clear, PX.ink.opacity(0.16)],
+                       center: .center, startRadius: 180, endRadius: 540)
     }
 }
 
@@ -248,10 +367,15 @@ struct PixelPet: View {
 
     // eye styles (center column of a ~3-wide eye)
     private func openEye(_ c: Int, _ f: (Int, Int, Color) -> Void) {
-        for x in c...(c+2) { for y in 15...18 { f(x, y, PX.white) } }
-        for x in c...(c+2) { f(x, 15, PX.ink) }                 // top lid
-        f(c+1, 17, PX.ink); f(c+2, 17, PX.ink); f(c+1, 18, PX.ink); f(c+2, 18, PX.ink) // pupil
-        f(c, 16, PX.white)                                       // shine
+        // big round sclera (3 wide × 5 tall)
+        for x in c...(c+2) { for y in 14...18 { f(x, y, PX.white) } }
+        // pupil 2×3
+        for x in (c+1)...(c+2) { for y in 15...17 { f(x, y, PX.ink) } }
+        // glints
+        f(c+1, 15, PX.white)                                     // big sparkle
+        f(c+2, 17, PX.white)                                     // small sparkle
+        // soft lower lid
+        for x in c...(c+2) { f(x, 18, Color(hex: 0xCED4E8)) }
     }
     private func smileEye(_ c: Int, _ f: (Int, Int, Color) -> Void) {
         f(c, 17, PX.ink); f(c+1, 16, PX.ink); f(c+2, 17, PX.ink)   // ∪ happy
