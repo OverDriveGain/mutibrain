@@ -29,10 +29,12 @@ final class IngestClient {
 
     init(cfg: SharedConfig) {
         self.cfg = cfg
-        let c = URLSessionConfiguration.default
+        let c = URLSessionConfiguration.ephemeral      // no disk/url cache to bloat the extension
         c.shouldUseExtendedBackgroundIdleMode = true
         c.waitsForConnectivity = true
-        c.timeoutIntervalForRequest = 30
+        c.timeoutIntervalForRequest = 20
+        c.urlCache = nil
+        c.httpMaximumConnectionsPerHost = 1
         self.session = URLSession(configuration: c)
     }
 
@@ -49,26 +51,30 @@ final class IngestClient {
         busy = true
         lock.unlock()
 
-        let body: [String: Any] = [
-            "agent_id": cfg.agentId,
-            "frames": [[
-                "frame_id": nextFrameId(),
-                "timestamp": Self.iso.string(from: timestamp),
-                "app_name": "iOS",
-                "capture_trigger": "periodic",
-                "text_source": "ocr",
-                "image_b64": jpeg.base64EncodedString(),
-                "image_mime": "image/jpeg",
-            ]],
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
-            finish(false); return
-        }
+        // Build the request body inside a pool so the (large) base64 string and
+        // JSON Data are freed as soon as URLSession has copied them.
         var req = URLRequest(url: cfg.ingestURL)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
-        req.httpBody = data
+        let built: Bool = autoreleasepool {
+            let body: [String: Any] = [
+                "agent_id": cfg.agentId,
+                "frames": [[
+                    "frame_id": nextFrameId(),
+                    "timestamp": Self.iso.string(from: timestamp),
+                    "app_name": "iOS",
+                    "capture_trigger": "periodic",
+                    "text_source": "ocr",
+                    "image_b64": jpeg.base64EncodedString(),
+                    "image_mime": "image/jpeg",
+                ]],
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+            req.httpBody = data
+            return true
+        }
+        guard built else { finish(false); return }
 
         session.dataTask(with: req) { [weak self] _, resp, err in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
