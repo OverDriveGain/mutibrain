@@ -56,13 +56,11 @@ struct VoiceBridge: UIViewRepresentable {
         }
 
         /// gadk's getUserMedia puts the session in call-mode → output defaults to
-        /// the earpiece. Force it to the loudspeaker so the assistant is audible.
+        /// the earpiece. Redirect ONLY the output port to the loudspeaker. We must
+        /// NOT setCategory/setActive here — that resets the webview's live mic
+        /// capture, which makes the agent hear silence.
         private func routeToSpeaker() {
-            let s = AVAudioSession.sharedInstance()
-            try? s.setCategory(.playAndRecord, mode: .default,
-                               options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
-            try? s.setActive(true)
-            try? s.overrideOutputAudioPort(.speaker)
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
         }
 
         func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
@@ -72,13 +70,13 @@ struct VoiceBridge: UIViewRepresentable {
                 case "rec":
                     let on = (d["on"] as? Bool) ?? false
                     self.state.active = on
-                    if on { self.routeToSpeaker() }
-                    else { self.state.caption = ""; self.state.answering = false }
+                    if on {
+                        // let the mic capture settle first, then nudge output to speaker
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.routeToSpeaker() }
+                    } else { self.state.caption = ""; self.state.answering = false }
                 case "status":
                     let t = (d["text"] as? String ?? "")
-                    let nowAnswering = t.contains("Answering")
-                    if nowAnswering && !self.state.answering { self.routeToSpeaker() }
-                    self.state.answering = nowAnswering
+                    self.state.answering = t.contains("Answering")
                 case "caption":
                     if (d["who"] as? String) == "agent" {
                         var t = d["text"] as? String ?? ""
