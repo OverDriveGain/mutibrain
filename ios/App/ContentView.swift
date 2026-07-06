@@ -10,6 +10,8 @@ struct ContentView: View {
     private var agentId: String = SharedConfig.defaultAgentId
     @AppStorage("gadkURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var gadkURL: String = SharedConfig.defaultGadk
+    @AppStorage("chatURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var chatURL: String = SharedConfig.defaultChat
 
     var body: some View {
         NavigationView {
@@ -20,6 +22,16 @@ struct ContentView: View {
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                     Text("The voice assistant the critter talks to. Paste the FULL tokenized URL (app + token — the same link the /voice QR encodes). Restart the app after changing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Chat (MyMu)") {
+                    TextField("https://code.kaxtus.com/?token=…", text: $chatURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    Text("MyMu agent-view share link for the Chat tab. Paste a token URL to open a different agent's conversation. Restart the app after changing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

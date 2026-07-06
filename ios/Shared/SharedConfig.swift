@@ -24,8 +24,10 @@ struct SharedConfig {
     // same tokenized URL the /voice QR encodes). Paste the full URL in Settings,
     // or replace the placeholder at build time (same pattern as the token below).
     static let defaultGadk = "https://agent.kaxtus.com/voice?app=manar&token=__GADK_TOKEN__"
-    // MyMu (CCUI) chat instance embedded in the Chat tab.
-    static let defaultChat = "https://code.kaxtus.com"
+    // MyMu (CCUI) chat embedded in the Chat tab. The agent-view share token
+    // (?token=…) logs the webview straight into the focused special-agent
+    // conversation — no manual login. Injected at build time like the others.
+    static let defaultChat = "https://code.kaxtus.com/?token=__MYMU_TOKEN__"
     // Injected at build time (see build pipeline); committed value is empty so no
     // secret lives in git. Set this on the build host before compiling for device.
     static let defaultToken = "__SCREENPIPE_TOKEN__"
