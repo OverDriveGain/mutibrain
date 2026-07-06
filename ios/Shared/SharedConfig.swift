@@ -20,7 +20,10 @@ struct SharedConfig {
     // ---- Compile-time defaults (source of truth for the broadcast extension) ----
     static let defaultBase = "http://192.168.0.229:8090"   // berlin LAN; use http://10.10.0.2:8090 on WireGuard
     static let defaultAgentId = "iphone-manar"
-    static let defaultGadk = "https://agent.kaxtus.com/voice"
+    // Since the single-env cutover the voice backend needs ?app= + ?token= (the
+    // same tokenized URL the /voice QR encodes). Paste the full URL in Settings,
+    // or replace the placeholder at build time (same pattern as the token below).
+    static let defaultGadk = "https://agent.kaxtus.com/voice?app=manar&token=__GADK_TOKEN__"
     // Injected at build time (see build pipeline); committed value is empty so no
     // secret lives in git. Set this on the build host before compiling for device.
     static let defaultToken = "__SCREENPIPE_TOKEN__"

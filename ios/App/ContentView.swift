@@ -15,11 +15,11 @@ struct ContentView: View {
         NavigationView {
             Form {
                 Section("Voice brain (gadk)") {
-                    TextField("https://agent.kaxtus.com/voice", text: $gadkURL)
+                    TextField("https://agent.kaxtus.com/voice?app=manar&token=…", text: $gadkURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    Text("The voice assistant the pet talks to. Restart the app after changing.")
+                    Text("The voice assistant the critter talks to. Paste the FULL tokenized URL (app + token — the same link the /voice QR encodes). Restart the app after changing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
