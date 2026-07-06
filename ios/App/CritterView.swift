@@ -25,6 +25,12 @@ final class CritterController: ObservableObject {
         let js = "window.critter && window.critter.setState('\(pendingState)')"
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
+
+    /// One-shot trick (jump/spin/dance/shake) — `move` must already be sanitized.
+    func perform(_ move: String) {
+        let js = "window.critter && window.critter.perform && window.critter.perform('\(move)')"
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
 }
 
 struct CritterView: UIViewRepresentable {

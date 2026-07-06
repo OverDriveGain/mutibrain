@@ -50,6 +50,11 @@ struct PetView: View {
         .onAppear { GadkVoice.beacon("app-launched") }
         .onChange(of: voice.active) { _ in critter.setState(critterState) }
         .onChange(of: voice.answering) { _ in critter.setState(critterState) }
+        .onChange(of: voice.moveRequest) { mv in
+            guard let mv, !mv.isEmpty else { return }
+            critter.perform(mv)
+            voice.moveRequest = nil        // re-arm for repeated identical moves
+        }
         .animation(.spring(response: 0.4, dampingFraction: 0.7), value: voice.active)
         .animation(.easeInOut(duration: 0.2), value: voice.caption)
         .sheet(isPresented: $showSettings) { ContentView() }

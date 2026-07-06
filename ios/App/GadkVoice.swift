@@ -24,6 +24,7 @@ final class GadkVoice: ObservableObject {
     @Published var active = false       // session running (mic live)
     @Published var answering = false    // assistant currently speaking
     @Published var caption = ""         // latest assistant words (this turn)
+    @Published var moveRequest: String? // critter move ordered by the agent (perform_move tool)
 
     /// Where + who to talk to, parsed from the configured gadk URL. Since the
     /// single-env cutover the backend serves one app per subscriber behind
@@ -387,6 +388,14 @@ final class GadkVoice: ObservableObject {
         if let content = ev["content"] as? [String: Any],
            let parts = content["parts"] as? [[String: Any]] {
             for part in parts {
+                // The agent's perform_move tool call is OUR cue: the client is
+                // the effector — forward the move to the critter webview.
+                if let fc = part["functionCall"] as? [String: Any],
+                   (fc["name"] as? String) == "perform_move",
+                   let args = fc["args"] as? [String: Any],
+                   let mv = args["move"] as? String {
+                    moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
+                }
                 if let inline = part["inlineData"] as? [String: Any],
                    let mime = inline["mimeType"] as? String, mime.hasPrefix("audio/pcm"),
                    let b64 = inline["data"] as? String {
