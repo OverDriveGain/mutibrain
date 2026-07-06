@@ -8,7 +8,7 @@ struct AIAssistantApp: App {
                 PetView()
                     .tabItem { Label("Buddy", systemImage: "mic.fill") }
                 ChatView()
-                    .ignoresSafeArea(.container, edges: .top)
+                    .background(Color.black.ignoresSafeArea())   // blend the status-bar strip
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
             }
         }
