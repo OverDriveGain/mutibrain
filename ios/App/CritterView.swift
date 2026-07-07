@@ -15,6 +15,8 @@ import WebKit
 final class CritterController: ObservableObject {
     fileprivate weak var webView: WKWebView?
     private var pendingState = "idle"
+    private var feedTimer: Timer?
+    private var feed: (origin: URL, app: String, token: String)?
 
     func setState(_ state: String) {
         pendingState = state
@@ -30,6 +32,54 @@ final class CritterController: ObservableObject {
     func perform(_ move: String) {
         let js = "window.critter && window.critter.perform && window.critter.perform('\(move)')"
         webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    // MARK: server feeds — pending brain tasks + capability cards
+    // The embed is render-only; the app is the data plane. We poll GET /pending
+    // (what was handed to the brain, what's still awaited) and push it into the
+    // webview; capabilities are fetched once and popped as idle hint bubbles.
+
+    func startFeeds(origin: URL, app: String, token: String) {
+        guard !app.isEmpty, !token.isEmpty else { return }
+        feed = (origin, app, token)
+        pushCapabilities()
+        refreshPending()
+        feedTimer?.invalidate()
+        feedTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.refreshPending()
+        }
+    }
+
+    func stopFeeds() {
+        feedTimer?.invalidate()
+        feedTimer = nil
+    }
+
+    fileprivate func pushCapabilities() { pushFeed(path: "capabilities", key: "capabilities", fn: "setCapabilities") }
+    func refreshPending() { pushFeed(path: "pending", key: "pending", fn: "setPending") }
+
+    private func pushFeed(path: String, key: String, fn: String) {
+        guard let feed else { return }
+        var c = URLComponents(url: feed.origin.appendingPathComponent(path),
+                              resolvingAgainstBaseURL: false)!
+        c.queryItems = [.init(name: "app", value: feed.app), .init(name: "token", value: feed.token)]
+        guard let url = c.url else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let arr = obj[key],
+                  let payload = try? JSONSerialization.data(withJSONObject: arr),
+                  let json = String(data: payload, encoding: .utf8) else { return }
+            // JSON is a valid JS literal except U+2028/9, which break evaluateJavaScript
+            let safe = json
+                .replacingOccurrences(of: "\u{2028}", with: " ")
+                .replacingOccurrences(of: "\u{2029}", with: " ")
+            DispatchQueue.main.async {
+                self?.webView?.evaluateJavaScript(
+                    "window.critter && window.critter.\(fn) && window.critter.\(fn)(\(safe))",
+                    completionHandler: nil)
+            }
+        }.resume()
     }
 }
 
@@ -70,6 +120,9 @@ struct CritterView: UIViewRepresentable {
         init(controller: CritterController) { self.controller = controller }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             controller.apply()
+            // Re-push feed data after any (re)load — the fresh page starts empty.
+            controller.pushCapabilities()
+            controller.refreshPending()
             // Report which embed the webview actually runs (cache diagnosis).
             // Delayed: the page's module script sets window.critter async.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak webView] in

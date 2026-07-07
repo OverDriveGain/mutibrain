@@ -47,9 +47,18 @@ struct PetView: View {
             .padding(.horizontal, 18)
             .padding(.bottom, 14)
         }
-        .onAppear { GadkVoice.beacon("app-launched") }
+        .onAppear {
+            GadkVoice.beacon("app-launched")
+            let t = GadkVoice.feedTarget()
+            critter.startFeeds(origin: t.origin, app: t.app, token: t.token)
+        }
+        .onDisappear { critter.stopFeeds() }
         .onChange(of: voice.active) { _ in critter.setState(critterState) }
         .onChange(of: voice.answering) { _ in critter.setState(critterState) }
+        .onChange(of: voice.brainDispatched) { _ in
+            // give the tool a beat to register in the ledger, then show the chip
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { critter.refreshPending() }
+        }
         .onChange(of: voice.moveRequest) { mv in
             guard let mv, !mv.isEmpty else { return }
             critter.perform(mv)

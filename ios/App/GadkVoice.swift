@@ -25,6 +25,14 @@ final class GadkVoice: ObservableObject {
     @Published var answering = false    // assistant currently speaking
     @Published var caption = ""         // latest assistant words (this turn)
     @Published var moveRequest: String? // critter move ordered by the agent (perform_move tool)
+    @Published var brainDispatched = 0  // bumps when ask_the_brain fires (cue: refresh /pending now)
+
+    /// (origin, app, token) for sibling fetches (/pending, /capabilities) —
+    /// same parse the voice session itself uses.
+    static func feedTarget() -> (origin: URL, app: String, token: String) {
+        let t = Target.from(SharedConfig.load().gadkURL)
+        return (t.origin, t.app, t.token ?? "")
+    }
 
     /// Where + who to talk to, parsed from the configured gadk URL. Since the
     /// single-env cutover the backend serves one app per subscriber behind
@@ -395,6 +403,12 @@ final class GadkVoice: ObservableObject {
                    let args = fc["args"] as? [String: Any],
                    let mv = args["move"] as? String {
                     moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
+                }
+                // ask_the_brain going out means the pending ledger just grew —
+                // cue an immediate /pending refresh so the chip appears at once.
+                if let fc = part["functionCall"] as? [String: Any],
+                   (fc["name"] as? String) == "ask_the_brain" {
+                    brainDispatched += 1
                 }
                 if let inline = part["inlineData"] as? [String: Any],
                    let mime = inline["mimeType"] as? String, mime.hasPrefix("audio/pcm"),
