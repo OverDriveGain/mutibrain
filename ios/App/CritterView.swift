@@ -53,7 +53,9 @@ struct CritterView: UIViewRepresentable {
         var comps = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         comps.path = "/static/critter/embed.html"
         comps.query = nil
-        web.load(URLRequest(url: comps.url!))
+        // Always refetch the page itself — WKWebView happily serves a stale
+        // embed.html for days otherwise (the hashed JS assets can still cache).
+        web.load(URLRequest(url: comps.url!, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
         return web
     }
 
@@ -68,6 +70,15 @@ struct CritterView: UIViewRepresentable {
         init(controller: CritterController) { self.controller = controller }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             controller.apply()
+            // Report which embed the webview actually runs (cache diagnosis).
+            // Delayed: the page's module script sets window.critter async.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak webView] in
+                webView?.evaluateJavaScript(
+                    "window.critter && window.critter.moves ? 'moves:' + window.critter.moves.join('+') : 'OLD-EMBED'"
+                ) { result, _ in
+                    GadkVoice.beacon("embed-\(result as? String ?? "no-critter-api")")
+                }
+            }
         }
     }
 }
