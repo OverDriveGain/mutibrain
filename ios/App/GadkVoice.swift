@@ -422,7 +422,9 @@ final class GadkVoice: ObservableObject {
         if let ot = ev["outputTranscription"] as? [String: Any],
            let t = ot["text"] as? String, !t.isEmpty {
             if newAgentTurn { caption = ""; newAgentTurn = false }
-            caption += t
+            // finished:true REPEATS the whole turn's text as one aggregate —
+            // appending it doubles the caption; replace with it (authoritative).
+            if ot["finished"] as? Bool == true { caption = t } else { caption += t }
             answering = true
         }
         if ev["turnComplete"] as? Bool == true {
