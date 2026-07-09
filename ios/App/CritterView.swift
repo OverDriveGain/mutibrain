@@ -45,8 +45,13 @@ final class CritterController: ObservableObject {
         pushCapabilities()
         refreshPending()
         feedTimer?.invalidate()
+        var tick = 0
         feedTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.refreshPending()
+            tick += 1
+            // The suggestion deck grows with the user's history — re-pull it
+            // every minute so new "want to follow up on…?" items appear.
+            if tick % 12 == 0 { self?.pushCapabilities() }
         }
     }
 

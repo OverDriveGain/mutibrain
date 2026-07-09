@@ -488,13 +488,19 @@ final class GadkVoice: ObservableObject {
         }
 
         if !engine.isRunning { rebuildPlayback() }
+        guard engine.isRunning else { return }  // rebuild failed — drop, don't crash
         if !player.isPlaying { player.play() }
         player.scheduleBuffer(out, completionHandler: nil)
     }
 
     private func flushPlayback() {
+        // Barge-in. player.play() throws an uncatchable NSException if the
+        // engine is stopped — and loud user speech can trigger an engine
+        // config change that stops it right before the `interrupted` event
+        // lands (this crashed the app). Guard; the config-change observer /
+        // playPcm's rebuild path restart playback for the next reply.
         player.stop()
-        player.play()
+        if engine.isRunning { player.play() }
     }
 
 }
