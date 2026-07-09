@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import UIKit
 
 /// Native realtime voice client for the gadk calendar agent (the pet's brain).
 ///
@@ -99,6 +100,9 @@ final class GadkVoice: ObservableObject {
     func start() {
         guard !active else { return }
         active = true; caption = ""; answering = false; newAgentTurn = true
+        // A conversation is hands-free — don't let the screen auto-lock and
+        // suspend the app mid-talk (session + critter die with it).
+        UIApplication.shared.isIdleTimerDisabled = true
         // Explicitly ask for the mic BEFORE the engine starts: without this a
         // fresh install records silence (the engine "works" but Gemini hears
         // nothing and never answers). AudioStreamer asks for screenpipe; this
@@ -128,6 +132,7 @@ final class GadkVoice: ObservableObject {
         guard active else { return }
         beacon("stop-called")
         active = false; answering = false; caption = ""
+        UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
         if engine.isRunning {
@@ -293,6 +298,16 @@ final class GadkVoice: ObservableObject {
         player.stop()
         engine.stop()
         engine.disconnectNodeOutput(player)
+        // The hardware rate can CHANGE mid-session (bluetooth/route flap — the
+        // crash session started at 44.1k while everything assumes 48k), and
+        // reconnecting with a stale format throws an uncatchable NSException.
+        // Re-derive the output format + converter from the CURRENT hardware.
+        let hwRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
+        if hwRate > 0, playOutFormat == nil || hwRate != playOutFormat.sampleRate {
+            playOutFormat = AVAudioFormat(standardFormatWithSampleRate: hwRate, channels: 1)!
+            playConverter = AVAudioConverter(from: playFormat, to: playOutFormat)
+            Self.beacon("play-fmt-rederived-\(Int(hwRate))Hz")
+        }
         engine.connect(player, to: engine.mainMixerNode, format: playOutFormat ?? playFormat)
         engine.mainMixerNode.outputVolume = 1.0
         engine.prepare()
