@@ -12,6 +12,33 @@ final class AudioStreamer: NSObject, ObservableObject {
     /// running capture with it ("mic goes off when I close the menu").
     static let shared = AudioStreamer()
 
+    /// Hard-on by default: the recorder starts with the app and keeps running
+    /// until explicitly stopped in Settings; that choice persists.
+    private static let enabledKey = "micAlwaysOn"
+
+    static var alwaysOn: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) == nil
+            || UserDefaults.standard.bool(forKey: enabledKey)
+    }
+
+    /// Called once at app launch: start capture unless the user turned it off.
+    func autoStartIfEnabled() {
+        guard Self.alwaysOn, !isStreaming else { return }
+        GadkVoice.beacon("sp-mic-autostart")
+        start()
+    }
+
+    /// User-intent wrappers (Settings button): remember the choice.
+    func userStart() {
+        UserDefaults.standard.set(true, forKey: Self.enabledKey)
+        start()
+    }
+
+    func userStop() {
+        UserDefaults.standard.set(false, forKey: Self.enabledKey)
+        stop()
+    }
+
     @Published private(set) var isStreaming = false
     @Published private(set) var connected = false
     @Published private(set) var sentKB: Double = 0

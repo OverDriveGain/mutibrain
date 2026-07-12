@@ -62,9 +62,12 @@ struct ContentView: View {
                             .monospacedDigit()
                     }
                     Button(audio.isStreaming ? "Stop microphone" : "Start microphone") {
-                        audio.isStreaming ? audio.stop() : audio.start()
+                        audio.isStreaming ? audio.userStop() : audio.userStart()
                     }
                     .tint(audio.isStreaming ? .red : .accentColor)
+                    Text("The microphone starts automatically with the app and keeps recording (also in the background) until stopped here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("Whole-device screen") {
