@@ -108,6 +108,16 @@ struct CritterView: UIViewRepresentable {
         var comps = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
         comps.path = "/static/critter/embed.html"
         comps.query = nil
+        // Pass the subscriber identity to the embed in the URL FRAGMENT (never
+        // sent to the server/logs): the task panel inside the page uses it to
+        // call /panel + /panel/run. Values come from the configured gadk URL.
+        let q = URLComponents(url: SharedConfig.load().gadkURL,
+                              resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let app = q.first { $0.name == "app" }?.value ?? ""
+        let token = q.first { $0.name == "token" }?.value ?? ""
+        if !app.isEmpty && !token.isEmpty {
+            comps.fragment = "app=\(app)&token=\(token)"
+        }
         // Always refetch the page itself — WKWebView happily serves a stale
         // embed.html for days otherwise (the hashed JS assets can still cache).
         web.load(URLRequest(url: comps.url!, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
