@@ -10,7 +10,7 @@ struct BroadcastPickerView: UIViewRepresentable {
     func makeUIView(context: Context) -> RPSystemBroadcastPickerView {
         let v = RPSystemBroadcastPickerView(frame: CGRect(x: 0, y: 0, width: 200, height: 60))
         v.preferredExtension = extensionBundleID
-        v.showsMicrophoneButton = false   // we stream the mic ourselves
+        v.showsMicrophoneButton = true    // system-level mic: survives other apps (YouTube), lock, everything
         // Make the embedded button fill the view and look tappable.
         for sub in v.subviews {
             if let button = sub as? UIButton {
