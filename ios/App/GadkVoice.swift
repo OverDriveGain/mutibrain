@@ -284,6 +284,27 @@ final class GadkVoice: ObservableObject {
         if Self.currentRoute().contains("Receiver") {
             try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
         }
+
+        // Background persistence: UIBackgroundModes=audio keeps us alive while
+        // the session records, but an INTERRUPTION (Siri, phone call, alarm)
+        // silently stops the engine — without this observer the mic dies until
+        // the user taps stop/start. Resume when iOS says we may.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, self.active,
+                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began {
+                Self.beacon("audio-interrupted")
+            } else if type == .ended {
+                let opts = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+                    .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+                Self.beacon("audio-interruption-ended-resume-\(opts.contains(.shouldResume))")
+                try? AVAudioSession.sharedInstance().setActive(true)
+                self.rebuildPlayback()
+            }
+        })
     }
 
     private static func currentRoute() -> String {
