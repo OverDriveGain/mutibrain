@@ -146,7 +146,11 @@ final class GadkVoice: ObservableObject {
         playDiagSent = false
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Never deactivate the shared session while the screenpipe mic is
+        // streaming in the background — that would kill its capture.
+        if !AudioStreamer.anyStreaming {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     // MARK: - Connect

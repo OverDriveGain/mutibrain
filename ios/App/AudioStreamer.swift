@@ -10,10 +10,15 @@ final class AudioStreamer: NSObject, ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var sentKB: Double = 0
 
+    /// Visible to GadkVoice: while the screenpipe mic streams, nobody may
+    /// deactivate the shared AVAudioSession (it would kill this stream).
+    static private(set) var anyStreaming = false
+
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private var converter: AVAudioConverter?
     private var ws: WebSocketClient?
+    private var observers: [NSObjectProtocol] = []
 
     /// What the server wants: 16 kHz, mono, signed 16-bit, interleaved.
     private let targetFormat = AVAudioFormat(
@@ -29,26 +34,84 @@ final class AudioStreamer: NSObject, ObservableObject {
         guard !isStreaming else { return }
         requestMicThen { [weak self] granted in
             guard let self, granted else { return }
+            GadkVoice.beacon("sp-mic-start-granted-\(granted)")
             self.configureSession()
             self.connect()
             do {
                 try self.startEngine()
+                Self.anyStreaming = true
+                self.installResilience()
                 DispatchQueue.main.async { self.isStreaming = true }
+                GadkVoice.beacon("sp-mic-streaming")
             } catch {
+                GadkVoice.beacon("sp-mic-engine-FAILED-\(error.localizedDescription)")
                 NSLog("AudioStreamer engine error: \(error)")
             }
         }
     }
 
     func stop() {
+        Self.anyStreaming = false
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
         ws?.close()
         ws = nil
+        converter = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         DispatchQueue.main.async {
             self.isStreaming = false
             self.connected = false
+        }
+        GadkVoice.beacon("sp-mic-stopped")
+    }
+
+    /// Everything iOS does to background audio, answered: interruptions
+    /// (Siri/calls/alarms) resume when allowed; engine halts (route/config
+    /// changes) rebuild; a mediaserverd crash rebuilds from the session up.
+    private func installResilience() {
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, Self.anyStreaming,
+                  let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began {
+                GadkVoice.beacon("sp-mic-interrupted")
+            } else {
+                GadkVoice.beacon("sp-mic-interruption-ended")
+                self.configureSession()
+                self.restartEngine("interruption-end")
+            }
+        })
+        observers.append(nc.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            guard let self, Self.anyStreaming, !self.engine.isRunning else { return }
+            self.restartEngine("config-change")
+        })
+        observers.append(nc.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, Self.anyStreaming else { return }
+            GadkVoice.beacon("sp-mic-mediaservices-reset")
+            self.configureSession()
+            self.restartEngine("media-reset")
+        })
+    }
+
+    private func restartEngine(_ why: String) {
+        engine.inputNode.removeTap(onBus: 0)
+        if engine.isRunning { engine.stop() }
+        engine.disconnectNodeOutput(playerNode)
+        converter = nil                      // formats may have changed — rebuild lazily
+        do {
+            try startEngine()
+            GadkVoice.beacon("sp-mic-recovered-\(why)")
+        } catch {
+            GadkVoice.beacon("sp-mic-recover-FAILED-\(why)-\(error.localizedDescription)")
         }
     }
 
@@ -87,14 +150,15 @@ final class AudioStreamer: NSObject, ObservableObject {
 
     private func startEngine() throws {
         let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
-        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
 
         // Player node lets the server stream a spoken reply back to the user.
-        engine.attach(playerNode)
+        if playerNode.engine == nil { engine.attach(playerNode) }
         engine.connect(playerNode, to: engine.mainMixerNode, format: targetFormat)
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+        // Tap in the node's NATIVE format; the converter is built lazily from
+        // the first real buffer (a snapshotted format goes silently dead on
+        // real devices after route changes — same bug the voice path had).
+        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
             self?.handle(buffer)
         }
 
@@ -106,7 +170,10 @@ final class AudioStreamer: NSObject, ObservableObject {
     // MARK: - Uplink (mic -> server)
 
     private func handle(_ buffer: AVAudioPCMBuffer) {
-        guard let converter else { return }
+        if converter == nil || converter!.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: targetFormat)
+        }
+        guard let converter, buffer.format.sampleRate > 0 else { return }
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
         guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
