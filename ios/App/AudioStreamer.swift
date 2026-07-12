@@ -1,11 +1,17 @@
 import Foundation
 import AVFoundation
+import UIKit
 
 /// Captures the mic continuously (including while backgrounded / screen locked,
 /// thanks to the `audio` background mode + an active record session) and streams
 /// 16 kHz mono PCM16 to the server. Also plays back any audio the server pushes
 /// down (e.g. the assistant's spoken reply / TTS).
 final class AudioStreamer: NSObject, ObservableObject {
+    /// ONE app-wide recorder. It must outlive the Settings sheet that toggles
+    /// it — a sheet-owned @StateObject deallocates on dismiss and takes the
+    /// running capture with it ("mic goes off when I close the menu").
+    static let shared = AudioStreamer()
+
     @Published private(set) var isStreaming = false
     @Published private(set) var connected = false
     @Published private(set) var sentKB: Double = 0
@@ -19,6 +25,8 @@ final class AudioStreamer: NSObject, ObservableObject {
     private var converter: AVAudioConverter?
     private var ws: WebSocketClient?
     private var observers: [NSObjectProtocol] = []
+    private var heartbeat: Timer?
+    private var hbCount = 0
 
     /// What the server wants: 16 kHz, mono, signed 16-bit, interleaved.
     private let targetFormat = AVAudioFormat(
@@ -41,8 +49,19 @@ final class AudioStreamer: NSObject, ObservableObject {
                 try self.startEngine()
                 Self.anyStreaming = true
                 self.installResilience()
-                DispatchQueue.main.async { self.isStreaming = true }
-                GadkVoice.beacon("sp-mic-streaming")
+                DispatchQueue.main.async {
+                    self.isStreaming = true
+                    // Ground-truth heartbeat: if these stop the moment the app
+                    // backgrounds, iOS suspended us; if they continue, capture
+                    // is alive and any "not recording" is downstream.
+                    self.hbCount = 0
+                    self.heartbeat = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                        guard let self else { return }
+                        self.hbCount += 1
+                        GadkVoice.beacon("sp-mic-hb-\(self.hbCount)-kb\(Int(self.sentKB))-eng\(self.engine.isRunning)")
+                    }
+                }
+                GadkVoice.beacon("sp-mic-streaming-v8")
             } catch {
                 GadkVoice.beacon("sp-mic-engine-FAILED-\(error.localizedDescription)")
                 NSLog("AudioStreamer engine error: \(error)")
@@ -52,6 +71,8 @@ final class AudioStreamer: NSObject, ObservableObject {
 
     func stop() {
         Self.anyStreaming = false
+        heartbeat?.invalidate()
+        heartbeat = nil
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         engine.inputNode.removeTap(onBus: 0)
@@ -100,6 +121,25 @@ final class AudioStreamer: NSObject, ObservableObject {
             self.configureSession()
             self.restartEngine("media-reset")
         })
+        // Lifecycle beacons: if "went-background" arrives and then NOTHING
+        // until the next launch, iOS suspended us (entitlement/session issue);
+        // if capture dies with an audio event instead, we'll see that event.
+        observers.append(nc.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            GadkVoice.beacon("sp-mic-went-background-engine-\(self.engine.isRunning)")
+        })
+        observers.append(nc.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            GadkVoice.beacon("sp-mic-foreground-again-engine-\(self.engine.isRunning)")
+            if Self.anyStreaming && !self.engine.isRunning {
+                self.configureSession()
+                self.restartEngine("foreground-revive")
+            }
+        })
     }
 
     private func restartEngine(_ why: String) {
@@ -129,9 +169,13 @@ final class AudioStreamer: NSObject, ObservableObject {
         let s = AVAudioSession.sharedInstance()
         do {
             // playAndRecord keeps the mic hot while we also play TTS back.
+            // NO .mixWithOthers: a mixable session is not the "primary audio
+            // app", and iOS SUSPENDS us on backgrounding despite the audio
+            // background mode — the exact "stops recording in background"
+            // symptom. Non-mixable = we own audio while recording.
             try s.setCategory(.playAndRecord,
                               mode: .voiceChat,
-                              options: [.allowBluetooth, .defaultToSpeaker, .mixWithOthers])
+                              options: [.allowBluetooth, .defaultToSpeaker])
             try s.setActive(true)
         } catch {
             NSLog("AudioStreamer session error: \(error)")

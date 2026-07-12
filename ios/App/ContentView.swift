@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var audio = AudioStreamer()
+    @ObservedObject private var audio = AudioStreamer.shared
     @AppStorage("serverBase", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var serverBase: String = SharedConfig.defaultBase
     @AppStorage("token", store: UserDefaults(suiteName: SharedConfig.appGroup))
