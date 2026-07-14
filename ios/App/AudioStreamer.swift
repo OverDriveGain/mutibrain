@@ -48,7 +48,6 @@ final class AudioStreamer: NSObject, ObservableObject {
     static private(set) var anyStreaming = false
 
     private let engine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
     private var converter: AVAudioConverter?
     private var ws: WebSocketClient?
     private var observers: [NSObjectProtocol] = []
@@ -102,12 +101,20 @@ final class AudioStreamer: NSObject, ObservableObject {
         heartbeat = nil
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
+        AudioGraph.q.async { [self] in
+            AudioGraph.guarded("sp-stop") {
+                engine.inputNode.removeTap(onBus: 0)
+                if engine.isRunning { engine.stop() }
+            }
+        }
         ws?.close()
         ws = nil
         converter = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        // Only drop the session if NOTHING else is using it — deactivating
+        // under a live voice call or playing music kills them.
+        if !SubsonicPlayer.isActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
         DispatchQueue.main.async {
             self.isStreaming = false
             self.connected = false
@@ -137,7 +144,11 @@ final class AudioStreamer: NSObject, ObservableObject {
         observers.append(nc.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
-            guard let self, Self.anyStreaming, !self.engine.isRunning else { return }
+            guard let self, Self.anyStreaming else { return }
+            // Entry beacon BEFORE touching the graph: the 22:50 play-music
+            // crash left no trace because this handler had none.
+            GadkVoice.beacon("sp-mic-config-change-eng\(self.engine.isRunning)")
+            guard !self.engine.isRunning else { return }
             self.restartEngine("config-change")
         })
         observers.append(nc.addObserver(
@@ -170,15 +181,18 @@ final class AudioStreamer: NSObject, ObservableObject {
     }
 
     private func restartEngine(_ why: String) {
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
-        engine.disconnectNodeOutput(playerNode)
-        converter = nil                      // formats may have changed — rebuild lazily
-        do {
-            try startEngine()
-            GadkVoice.beacon("sp-mic-recovered-\(why)")
-        } catch {
-            GadkVoice.beacon("sp-mic-recover-FAILED-\(why)-\(error.localizedDescription)")
+        AudioGraph.q.async { [self] in
+            AudioGraph.guarded("sp-restart-teardown") {
+                engine.inputNode.removeTap(onBus: 0)
+                if engine.isRunning { engine.stop() }
+            }
+            converter = nil                  // formats may have changed — rebuild lazily
+            do {
+                try startEngineLocked()
+                GadkVoice.beacon("sp-mic-recovered-\(why)")
+            } catch {
+                GadkVoice.beacon("sp-mic-recover-FAILED-\(why)-\(error.localizedDescription)")
+            }
         }
     }
 
@@ -203,29 +217,41 @@ final class AudioStreamer: NSObject, ObservableObject {
         let cfg = SharedConfig.load()
         let client = WebSocketClient(url: cfg.audioURL, token: cfg.token)
         client.onState = { [weak self] up in DispatchQueue.main.async { self?.connected = up } }
-        client.onData = { [weak self] data in self?.playback(pcm16: data) }
+        client.onData = { data in
+            // Downlink audio is not wired (legacy WS never sends any). If the
+            // server ever starts, we want to know — not crash into a dead node.
+            GadkVoice.beacon("sp-mic-unexpected-downlink-\(data.count)B")
+        }
         client.onText = { text in NSLog("server: \(text)") }
         client.connect()
         ws = client
     }
 
     private func startEngine() throws {
-        let input = engine.inputNode
+        try AudioGraph.q.sync { try startEngineLocked() }
+    }
 
-        // Player node lets the server stream a spoken reply back to the user.
-        if playerNode.engine == nil { engine.attach(playerNode) }
-        engine.connect(playerNode, to: engine.mainMixerNode, format: targetFormat)
+    /// MUST run on AudioGraph.q. Capture-only: the old downlink playerNode
+    /// (server TTS -> speaker over the legacy /v1/audio WS) was dead code the
+    /// server never exercised, and its connect/play calls in every restart
+    /// were pure crash surface — removed.
+    private func startEngineLocked() throws {
+        let input = engine.inputNode
 
         // Tap in the node's NATIVE format; the converter is built lazily from
         // the first real buffer (a snapshotted format goes silently dead on
         // real devices after route changes — same bug the voice path had).
-        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
-            self?.handle(buffer)
+        let tapped = AudioGraph.guarded("sp-tap") {
+            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+                self?.handle(buffer)
+            }
         }
-
+        guard tapped else {
+            throw NSError(domain: "spmic", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "mic tap install failed"])
+        }
         engine.prepare()
         try engine.start()
-        playerNode.play()
     }
 
     // MARK: - Uplink (mic -> server)
@@ -257,21 +283,4 @@ final class AudioStreamer: NSObject, ObservableObject {
         DispatchQueue.main.async { self.sentKB += Double(bytes) / 1024 }
     }
 
-    // MARK: - Downlink (server TTS -> speaker)
-
-    /// Server pushes raw 16 kHz mono PCM16; schedule it on the player node.
-    private func playback(pcm16 data: Data) {
-        let frames = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
-        guard frames > 0,
-              let buf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: frames),
-              let dst = buf.int16ChannelData else { return }
-        buf.frameLength = frames
-        data.withUnsafeBytes { raw in
-            if let src = raw.bindMemory(to: Int16.self).baseAddress {
-                dst[0].update(from: src, count: Int(frames))
-            }
-        }
-        playerNode.scheduleBuffer(buf, completionHandler: nil)
-        if !playerNode.isPlaying { playerNode.play() }
-    }
 }

@@ -2,6 +2,12 @@ import SwiftUI
 
 @main
 struct AIAssistantApp: App {
+    init() {
+        CrashReporter.install()
+        // If the previous run died, tell the server journal what killed it.
+        CrashReporter.reportIfCrashed()
+    }
+
     var body: some Scene {
         WindowGroup {
             TabView {

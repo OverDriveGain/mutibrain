@@ -135,11 +135,15 @@ final class GadkVoice: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
-        if engine.isRunning {
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
+        AudioGraph.q.async { [self] in
+            AudioGraph.guarded("gadk-stop") {
+                if engine.isRunning {
+                    engine.inputNode.removeTap(onBus: 0)
+                    engine.stop()
+                }
+                player.stop()
+            }
         }
-        player.stop()
         sendQueue.async { [weak self] in self?.pendingSend.removeAll() }
         tapFired = false
         micConverter = nil
@@ -221,6 +225,12 @@ final class GadkVoice: ObservableObject {
     }
 
     private func startEngine() throws {
+        // Serialize with every other graph mutation (AudioStreamer restarts,
+        // rebuilds, buffer scheduling) — racing them is what crashed the app.
+        try AudioGraph.q.sync { try startEngineLocked() }
+    }
+
+    private func startEngineLocked() throws {
         let input = engine.inputNode
 
         // CRASH GUARD: installing a tap when the input node has no valid format
@@ -235,13 +245,22 @@ final class GadkVoice: ObservableObject {
                               userInfo: [NSLocalizedDescriptionKey: "no audio input available"])
             }
         }
-        try? input.setVoiceProcessingEnabled(true)   // engine-level AEC — needs no .voiceChat mode
+        try? input.setVoiceProcessingEnabled(true)   // engine-level AEC
+        // Enabling voice processing silently FLIPS the session mode to
+        // .voiceChat (beacon-proven: cat=PlayAndRecord-mode=VoiceChat), whose
+        // AEC unit DUCKS all other audio — that's why music went quiet even
+        // after the "one shared session" rebuild. iOS 17+ has the sanctioned
+        // knob: keep AEC but tell the VP unit not to duck other audio.
+        if #available(iOS 17.0, *) {
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                    enableAdvancedDucking: false, duckingLevel: .min)
+        }
 
         let session = AVAudioSession.sharedInstance()
         try? session.overrideOutputAudioPort(.speaker)
         Self.beacon("route-\(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
 
-        engine.attach(player)
         // With voice processing enabled the output element silently drops audio
         // that isn't at the HARDWARE sample rate (the simulator tolerates it,
         // real devices don't): the player "plays", the mixer "resamples", the
@@ -251,7 +270,14 @@ final class GadkVoice: ObservableObject {
         playOutFormat = AVAudioFormat(standardFormatWithSampleRate: hwRate > 0 ? hwRate : 48000,
                                       channels: 1)!
         playConverter = AVAudioConverter(from: playFormat, to: playOutFormat)
-        engine.connect(player, to: engine.mainMixerNode, format: playOutFormat)
+        let wired = AudioGraph.guarded("gadk-wire") {
+            engine.attach(player)
+            engine.connect(player, to: engine.mainMixerNode, format: playOutFormat)
+        }
+        guard wired else {
+            throw NSError(domain: "gadk", code: 4,
+                          userInfo: [NSLocalizedDescriptionKey: "audio graph wire failed"])
+        }
         Self.beacon("play-fmt-\(Int(playOutFormat.sampleRate))Hz")
 
         // Tap in the node's NATIVE format (format: nil). On real hardware the
@@ -261,13 +287,19 @@ final class GadkVoice: ObservableObject {
         // first real buffer instead (see handleMic).
         let tapFormat = input.outputFormat(forBus: 0)
         Self.beacon("tap-format-\(Int(tapFormat.sampleRate))Hz-\(tapFormat.channelCount)ch")
-        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buf, _ in
-            self?.handleMic(buf)
+        let tapped = AudioGraph.guarded("gadk-tap") {
+            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buf, _ in
+                self?.handleMic(buf)
+            }
+        }
+        guard tapped else {
+            throw NSError(domain: "gadk", code: 5,
+                          userInfo: [NSLocalizedDescriptionKey: "mic tap install failed"])
         }
         engine.prepare()
         try engine.start()
-        player.play()
-        Self.beacon("route-after-start-\(Self.currentRoute())")
+        AudioGraph.guarded("gadk-play") { player.play() }
+        Self.beacon("route-after-start-\(Self.currentRoute())-\(AudioSessionManager.describe())")
 
         // If iOS halts the engine (route/config change mid-call), restart it —
         // otherwise the mic silently dies and the call looks frozen.
@@ -329,9 +361,16 @@ final class GadkVoice: ObservableObject {
     /// silently invalidated: the engine runs, the mic tap works, buffers get
     /// scheduled — into a dead node. Rebuild the whole playback leg.
     private func rebuildPlayback() {
-        player.stop()
-        engine.stop()
-        engine.disconnectNodeOutput(player)
+        AudioGraph.q.async { [weak self] in self?.rebuildPlaybackLocked() }
+    }
+
+    /// MUST run on AudioGraph.q.
+    private func rebuildPlaybackLocked() {
+        AudioGraph.guarded("gadk-rebuild-teardown") {
+            player.stop()
+            engine.stop()
+            engine.disconnectNodeOutput(player)
+        }
         // The hardware rate can CHANGE mid-session (bluetooth/route flap — the
         // crash session started at 44.1k while everything assumes 48k), and
         // reconnecting with a stale format throws an uncatchable NSException.
@@ -342,12 +381,21 @@ final class GadkVoice: ObservableObject {
             playConverter = AVAudioConverter(from: playFormat, to: playOutFormat)
             Self.beacon("play-fmt-rederived-\(Int(hwRate))Hz")
         }
-        engine.connect(player, to: engine.mainMixerNode, format: playOutFormat ?? playFormat)
+        var connected = AudioGraph.guarded("gadk-rebuild-connect") {
+            engine.connect(player, to: engine.mainMixerNode, format: playOutFormat ?? playFormat)
+        }
+        if !connected {
+            // Degrade: let the engine pick the format rather than staying dead.
+            connected = AudioGraph.guarded("gadk-rebuild-connect-nilfmt") {
+                engine.connect(player, to: engine.mainMixerNode, format: nil)
+            }
+        }
+        guard connected else { return }
         engine.mainMixerNode.outputVolume = 1.0
         engine.prepare()
         do {
             try engine.start()
-            player.play()
+            AudioGraph.guarded("gadk-rebuild-play") { player.play() }
             Self.beacon("playback-rebuilt-running")
         } catch {
             Self.beacon("playback-rebuild-FAILED-\(error.localizedDescription)")
@@ -464,6 +512,13 @@ final class GadkVoice: ObservableObject {
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
                         Self.beacon("play-music-\(songs.count)-\(AudioSessionManager.describe())")
                         SubsonicPlayer.shared.play(songs)
+                        // The historical crash window is the first seconds of
+                        // playback — snapshot the session + engines there.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                            guard let self else { return }
+                            Self.beacon("music-t2-\(AudioSessionManager.describe())"
+                                + "-eng\(self.engine.isRunning)-alive")
+                        }
                     }
                 }
                 // ask_the_brain going out means the pending ledger just grew —
@@ -549,10 +604,17 @@ final class GadkVoice: ObservableObject {
             out = ob
         }
 
-        if !engine.isRunning { rebuildPlayback() }
-        guard engine.isRunning else { return }  // rebuild failed — drop, don't crash
-        if !player.isPlaying { player.play() }
-        player.scheduleBuffer(out, completionHandler: nil)
+        // Scheduling races the rebuild/restart paths — do it where they run.
+        let buf2 = out
+        AudioGraph.q.async { [weak self] in
+            guard let self, self.active else { return }
+            if !self.engine.isRunning { self.rebuildPlaybackLocked() }
+            guard self.engine.isRunning else { return }  // rebuild failed — drop, don't crash
+            AudioGraph.guarded("gadk-schedule") {
+                if !self.player.isPlaying { self.player.play() }
+                self.player.scheduleBuffer(buf2, completionHandler: nil)
+            }
+        }
     }
 
     private func flushPlayback() {
@@ -561,8 +623,13 @@ final class GadkVoice: ObservableObject {
         // config change that stops it right before the `interrupted` event
         // lands (this crashed the app). Guard; the config-change observer /
         // playPcm's rebuild path restart playback for the next reply.
-        player.stop()
-        if engine.isRunning { player.play() }
+        AudioGraph.q.async { [weak self] in
+            guard let self else { return }
+            AudioGraph.guarded("gadk-flush") {
+                self.player.stop()
+                if self.engine.isRunning { self.player.play() }
+            }
+        }
     }
 
 }

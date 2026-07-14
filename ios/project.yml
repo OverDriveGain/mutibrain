@@ -29,6 +29,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.manarz.aiassistant
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/AIAssistant.entitlements
+        # ExcCatch: ObjC NSException-catch shim for AVAudioEngine graph calls
+        SWIFT_OBJC_BRIDGING_HEADER: App/BridgingHeader.h
 
   ScreenBroadcast:
     type: app-extension

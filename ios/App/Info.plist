@@ -36,6 +36,9 @@
     <key>NSMicrophoneUsageDescription</key>
     <string>The assistant streams your microphone so it can listen and respond.</string>
 
+    <key>NSCameraUsageDescription</key>
+    <string>Scan your voice-assistant QR code to log in.</string>
+
     <!-- Allow ws:// (cleartext) to a LAN dev server. Tighten for production. -->
     <key>NSAppTransportSecurity</key>
     <dict>

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject private var audio = AudioStreamer.shared
+    @State private var showQRLogin = false
     @AppStorage("serverBase", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var serverBase: String = SharedConfig.defaultBase
     @AppStorage("token", store: UserDefaults(suiteName: SharedConfig.appGroup))
@@ -17,11 +18,16 @@ struct ContentView: View {
         NavigationView {
             Form {
                 Section("Voice brain (gadk)") {
+                    Button {
+                        showQRLogin = true
+                    } label: {
+                        Label("Scan QR code to log in", systemImage: "qrcode.viewfinder")
+                    }
                     TextField("https://agent.kaxtus.com/voice?app=manar&token=…", text: $gadkURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    Text("The voice assistant the critter talks to. Paste the FULL tokenized URL (app + token — the same link the /voice QR encodes). Restart the app after changing.")
+                    Text("The voice assistant the critter talks to. Scan your QR from the server's admin page, or paste the FULL tokenized URL (app + token). Restart the app after changing.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -87,6 +93,9 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("AI Assistant")
+            .sheet(isPresented: $showQRLogin) {
+                QRLoginView { scanned in gadkURL = scanned }
+            }
         }
     }
 }
