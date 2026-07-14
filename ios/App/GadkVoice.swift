@@ -99,7 +99,7 @@ final class GadkVoice: ObservableObject {
 
     func start() {
         guard !active else { return }
-        active = true; caption = ""; answering = false; newAgentTurn = true; suppressAudio = false
+        active = true; caption = ""; answering = false; newAgentTurn = true
         // A conversation is hands-free — don't let the screen auto-lock and
         // suspend the app mid-talk (session + critter die with it).
         UIApplication.shared.isIdleTimerDisabled = true
@@ -214,20 +214,29 @@ final class GadkVoice: ObservableObject {
     // MARK: - Audio engine
 
     private func configureAudioSession() throws {
-        let s = AVAudioSession.sharedInstance()
-        try s.setCategory(.playAndRecord, mode: .voiceChat,
-                          options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
-        try s.setActive(true, options: .notifyOthersOnDeactivation)
-        try? s.overrideOutputAudioPort(.speaker)   // loud by default (the old earpiece complaint)
+        // Shared, never-switching session (see AudioSessionManager). Mode
+        // .default (not .voiceChat) so music mixes at equal volume instead of
+        // being ducked; AEC is still applied at the engine node below.
+        AudioSessionManager.configure()
     }
 
     private func startEngine() throws {
         let input = engine.inputNode
-        try? input.setVoiceProcessingEnabled(true)   // hardware AEC so the agent can't hear itself
 
-        // Voice processing resets the route to the earpiece. Force the speaker
-        // BEFORE the engine starts — overriding after start fires a
-        // configuration change that halts the engine (mic goes dead).
+        // CRASH GUARD: installing a tap when the input node has no valid format
+        // (0 Hz / 0 ch — happens transiently right after a session change, e.g.
+        // starting a call while music is playing) crashes hard. Re-assert the
+        // session and bail gracefully instead of trapping.
+        if input.inputFormat(forBus: 0).sampleRate == 0 || input.inputFormat(forBus: 0).channelCount == 0 {
+            AudioSessionManager.configure()
+            if input.inputFormat(forBus: 0).sampleRate == 0 {
+                Self.beacon("no-input-format-abort")
+                throw NSError(domain: "gadk", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "no audio input available"])
+            }
+        }
+        try? input.setVoiceProcessingEnabled(true)   // engine-level AEC — needs no .voiceChat mode
+
         let session = AVAudioSession.sharedInstance()
         try? session.overrideOutputAudioPort(.speaker)
         Self.beacon("route-\(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
@@ -346,7 +355,6 @@ final class GadkVoice: ObservableObject {
     }
 
     private var tapFired = false
-    private var suppressAudio = false      // mute the assistant (music command in flight)
     private var observers: [NSObjectProtocol] = []
     private var playOutFormat: AVAudioFormat!
     private var playConverter: AVAudioConverter?
@@ -439,32 +447,23 @@ final class GadkVoice: ObservableObject {
             for part in parts {
                 // The agent's perform_move tool call is OUR cue: the client is
                 // the effector — forward the move to the critter webview.
-                if let fc = part["functionCall"] as? [String: Any] {
-                    let name = fc["name"] as? String
-                    if name == "perform_move",
-                       let args = fc["args"] as? [String: Any], let mv = args["move"] as? String {
-                        moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
-                    }
-                    // A music command is starting: MUTE the assistant instantly so
-                    // you never hear the aborted "okay, playing…" — and flush any
-                    // audio already queued for this turn.
-                    if name == "play_music" || name == "music_playlist" {
-                        suppressAudio = true
-                        flushPlayback()
-                    }
+                if let fc = part["functionCall"] as? [String: Any],
+                   (fc["name"] as? String) == "perform_move",
+                   let args = fc["args"] as? [String: Any], let mv = args["move"] as? String {
+                    moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
                 }
-                // Any tool that returns {status:"playing", songs:[...]} (play_music
-                // or music_playlist) -> start playback here, then end the chat so
-                // its echo-cancel session stops ducking the music.
+                // Any tool that returns {status:"playing", songs:[...]} -> start
+                // playback. The conversation KEEPS GOING: the shared session
+                // (mode .default) mixes the assistant's voice and the music at
+                // equal volume — no stopping the mic, no muting the reply.
                 if let fr = part["functionResponse"] as? [String: Any],
                    let resp = fr["response"] as? [String: Any],
                    (resp["status"] as? String) == "playing",
                    let raw = resp["songs"] {
                     if let data = try? JSONSerialization.data(withJSONObject: raw),
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
-                        Self.beacon("play-music-\(songs.count)-songs")
+                        Self.beacon("play-music-\(songs.count)-\(AudioSessionManager.describe())")
                         SubsonicPlayer.shared.play(songs)
-                        DispatchQueue.main.async { self.stop() }
                     }
                 }
                 // ask_the_brain going out means the pending ledger just grew —
@@ -511,7 +510,6 @@ final class GadkVoice: ObservableObject {
     }
 
     private func playPcm(_ b64: String) {
-        if suppressAudio { return }        // music command in flight — stay silent
         guard let data = decodeB64(b64) else {
             b64Drops += 1
             if b64Drops == 1 || b64Drops % 50 == 0 { Self.beacon("b64-drop-\(b64Drops)") }

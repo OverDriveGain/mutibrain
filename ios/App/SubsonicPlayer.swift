@@ -116,23 +116,12 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         updateNowPlaying()
     }
 
-    /// Force a LOUD, non-ducking session for music. Two cases:
-    /// - not recording -> `.playback` (loudest, media volume).
-    /// - recording (screenpipe always-on) -> `.playAndRecord` + `.default`
-    ///   forced to the speaker: keeps capture alive but does NOT duck like
-    ///   `.voiceChat` did. Always set the category (a prior conversation may
-    ///   have left it in `.voiceChat`, which is why music was quiet).
+    /// The ONE shared session — same policy the voice + recorder use, so
+    /// nothing switches categories (that switching is what crashed the app and
+    /// what quieted the music). Mode .default -> music MIXES with the assistant
+    /// at equal volume instead of being ducked.
     private func activateSession() {
-        let s = AVAudioSession.sharedInstance()
-        if AudioStreamer.anyStreaming {
-            try? s.setCategory(.playAndRecord, mode: .default,
-                               options: [.defaultToSpeaker, .allowBluetooth, .allowAirPlay])
-            try? s.setActive(true)
-            try? s.overrideOutputAudioPort(.speaker)
-        } else {
-            try? s.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
-            try? s.setActive(true)
-        }
+        AudioSessionManager.configure()
     }
 
     // MARK: - Now Playing / remote transport

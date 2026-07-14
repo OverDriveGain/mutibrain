@@ -193,24 +193,10 @@ final class AudioStreamer: NSObject, ObservableObject {
     }
 
     private func configureSession() {
-        let s = AVAudioSession.sharedInstance()
-        do {
-            // playAndRecord keeps the mic hot while we also play TTS back.
-            // NO .mixWithOthers: a mixable session is not the "primary audio
-            // app", and iOS SUSPENDS us on backgrounding despite the audio
-            // background mode — the exact "stops recording in background"
-            // symptom. Non-mixable = we own audio while recording.
-            // mode .default (not .voiceChat): voiceChat's echo-cancellation
-            // DUCKS everything else, making music quiet. The screenpipe capture
-            // just needs raw mic, so .default lets music stay LOUD while we
-            // keep recording in the background.
-            try s.setCategory(.playAndRecord,
-                              mode: .default,
-                              options: [.allowBluetooth, .defaultToSpeaker])
-            try s.setActive(true)
-        } catch {
-            NSLog("AudioStreamer session error: \(error)")
-        }
+        // Shared, never-switching session (see AudioSessionManager): one
+        // category app-wide so music, voice, and this recorder coexist and mix
+        // without ducking or the category-switch crash.
+        AudioSessionManager.configure()
     }
 
     private func connect() {
