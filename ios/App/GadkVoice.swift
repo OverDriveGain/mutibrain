@@ -147,8 +147,8 @@ final class GadkVoice: ObservableObject {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         // Never deactivate the shared session while the screenpipe mic is
-        // streaming in the background — that would kill its capture.
-        if !AudioStreamer.anyStreaming {
+        // streaming OR music is playing — that would kill capture / playback.
+        if !AudioStreamer.anyStreaming && !SubsonicPlayer.isActive {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
@@ -455,6 +455,10 @@ final class GadkVoice: ObservableObject {
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
                         Self.beacon("play-music-\(songs.count)-songs")
                         SubsonicPlayer.shared.play(songs)
+                        // End the conversation so its voice-processing session
+                        // stops ducking the music — you asked her to play, she
+                        // plays, the chat ends and music is loud.
+                        DispatchQueue.main.async { self.stop() }
                     }
                 }
                 // ask_the_brain going out means the pending ledger just grew —

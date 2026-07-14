@@ -29,6 +29,10 @@ final class SubsonicPlayer: NSObject, ObservableObject {
     @Published private(set) var index: Int = 0
     @Published private(set) var isPlaying = false
 
+    /// True once music owns the audio session — so GadkVoice.stop() won't
+    /// deactivate the shared session out from under the music.
+    static private(set) var isActive = false
+
     var current: Song? { queue.indices.contains(index) ? queue[index] : nil }
 
     private let player = AVPlayer()
@@ -48,10 +52,34 @@ final class SubsonicPlayer: NSObject, ObservableObject {
     /// Replace the queue and start at `startAt`. This is what voice + taps call.
     func play(_ songs: [Song], startAt: Int = 0) {
         guard !songs.isEmpty else { return }
+        Self.isActive = true
         queue = songs
         index = max(0, min(startAt, songs.count - 1))
         activateSession()
         playCurrent()
+    }
+
+    /// Append to the current queue (or start it if empty).
+    func addToQueue(_ songs: [Song]) {
+        if queue.isEmpty { play(songs) } else { queue.append(contentsOf: songs) }
+    }
+
+    /// Jump to a queue position (tapping a row in the Queue view).
+    func playAt(_ i: Int) {
+        guard queue.indices.contains(i) else { return }
+        Self.isActive = true
+        index = i
+        activateSession()
+        playCurrent()
+    }
+
+    /// Remove a queue entry, keeping playback sensible.
+    func removeFromQueue(at i: Int) {
+        guard queue.indices.contains(i) else { return }
+        queue.remove(at: i)
+        if queue.isEmpty { player.pause(); index = 0; return }
+        if i < index { index -= 1 }
+        else if i == index { index = min(index, queue.count - 1); playCurrent() }
     }
 
     func toggle() {

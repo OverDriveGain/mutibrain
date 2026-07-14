@@ -200,8 +200,12 @@ final class AudioStreamer: NSObject, ObservableObject {
             // app", and iOS SUSPENDS us on backgrounding despite the audio
             // background mode — the exact "stops recording in background"
             // symptom. Non-mixable = we own audio while recording.
+            // mode .default (not .voiceChat): voiceChat's echo-cancellation
+            // DUCKS everything else, making music quiet. The screenpipe capture
+            // just needs raw mic, so .default lets music stay LOUD while we
+            // keep recording in the background.
             try s.setCategory(.playAndRecord,
-                              mode: .voiceChat,
+                              mode: .default,
                               options: [.allowBluetooth, .defaultToSpeaker])
             try s.setActive(true)
         } catch {
