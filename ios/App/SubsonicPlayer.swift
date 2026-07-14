@@ -116,14 +116,23 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         updateNowPlaying()
     }
 
-    /// Music wants .playback, but the always-on mic recorder may own the session
-    /// as .playAndRecord — don't stomp it (that would kill background capture).
+    /// Force a LOUD, non-ducking session for music. Two cases:
+    /// - not recording -> `.playback` (loudest, media volume).
+    /// - recording (screenpipe always-on) -> `.playAndRecord` + `.default`
+    ///   forced to the speaker: keeps capture alive but does NOT duck like
+    ///   `.voiceChat` did. Always set the category (a prior conversation may
+    ///   have left it in `.voiceChat`, which is why music was quiet).
     private func activateSession() {
         let s = AVAudioSession.sharedInstance()
-        if !AudioStreamer.anyStreaming {
+        if AudioStreamer.anyStreaming {
+            try? s.setCategory(.playAndRecord, mode: .default,
+                               options: [.defaultToSpeaker, .allowBluetooth, .allowAirPlay])
+            try? s.setActive(true)
+            try? s.overrideOutputAudioPort(.speaker)
+        } else {
             try? s.setCategory(.playback, mode: .default, options: [.allowBluetooth, .allowAirPlay])
+            try? s.setActive(true)
         }
-        try? s.setActive(true)
     }
 
     // MARK: - Now Playing / remote transport

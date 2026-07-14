@@ -99,7 +99,7 @@ final class GadkVoice: ObservableObject {
 
     func start() {
         guard !active else { return }
-        active = true; caption = ""; answering = false; newAgentTurn = true
+        active = true; caption = ""; answering = false; newAgentTurn = true; suppressAudio = false
         // A conversation is hands-free — don't let the screen auto-lock and
         // suspend the app mid-talk (session + critter die with it).
         UIApplication.shared.isIdleTimerDisabled = true
@@ -346,6 +346,7 @@ final class GadkVoice: ObservableObject {
     }
 
     private var tapFired = false
+    private var suppressAudio = false      // mute the assistant (music command in flight)
     private var observers: [NSObjectProtocol] = []
     private var playOutFormat: AVAudioFormat!
     private var playConverter: AVAudioConverter?
@@ -438,16 +439,24 @@ final class GadkVoice: ObservableObject {
             for part in parts {
                 // The agent's perform_move tool call is OUR cue: the client is
                 // the effector — forward the move to the critter webview.
-                if let fc = part["functionCall"] as? [String: Any],
-                   (fc["name"] as? String) == "perform_move",
-                   let args = fc["args"] as? [String: Any],
-                   let mv = args["move"] as? String {
-                    moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
+                if let fc = part["functionCall"] as? [String: Any] {
+                    let name = fc["name"] as? String
+                    if name == "perform_move",
+                       let args = fc["args"] as? [String: Any], let mv = args["move"] as? String {
+                        moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
+                    }
+                    // A music command is starting: MUTE the assistant instantly so
+                    // you never hear the aborted "okay, playing…" — and flush any
+                    // audio already queued for this turn.
+                    if name == "play_music" || name == "music_playlist" {
+                        suppressAudio = true
+                        flushPlayback()
+                    }
                 }
-                // Voice "play music": the tool searched the library server-side
-                // and returned songs (with stream URLs) — start playback here.
+                // Any tool that returns {status:"playing", songs:[...]} (play_music
+                // or music_playlist) -> start playback here, then end the chat so
+                // its echo-cancel session stops ducking the music.
                 if let fr = part["functionResponse"] as? [String: Any],
-                   (fr["name"] as? String) == "play_music",
                    let resp = fr["response"] as? [String: Any],
                    (resp["status"] as? String) == "playing",
                    let raw = resp["songs"] {
@@ -455,9 +464,6 @@ final class GadkVoice: ObservableObject {
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
                         Self.beacon("play-music-\(songs.count)-songs")
                         SubsonicPlayer.shared.play(songs)
-                        // End the conversation so its voice-processing session
-                        // stops ducking the music — you asked her to play, she
-                        // plays, the chat ends and music is loud.
                         DispatchQueue.main.async { self.stop() }
                     }
                 }
@@ -505,6 +511,7 @@ final class GadkVoice: ObservableObject {
     }
 
     private func playPcm(_ b64: String) {
+        if suppressAudio { return }        // music command in flight — stay silent
         guard let data = decodeB64(b64) else {
             b64Drops += 1
             if b64Drops == 1 || b64Drops % 50 == 0 { Self.beacon("b64-drop-\(b64Drops)") }
