@@ -444,6 +444,19 @@ final class GadkVoice: ObservableObject {
                    let mv = args["move"] as? String {
                     moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
                 }
+                // Voice "play music": the tool searched the library server-side
+                // and returned songs (with stream URLs) — start playback here.
+                if let fr = part["functionResponse"] as? [String: Any],
+                   (fr["name"] as? String) == "play_music",
+                   let resp = fr["response"] as? [String: Any],
+                   (resp["status"] as? String) == "playing",
+                   let raw = resp["songs"] {
+                    if let data = try? JSONSerialization.data(withJSONObject: raw),
+                       let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
+                        Self.beacon("play-music-\(songs.count)-songs")
+                        SubsonicPlayer.shared.play(songs)
+                    }
+                }
                 // ask_the_brain going out means the pending ledger just grew —
                 // cue an immediate /pending refresh so the chip appears at once.
                 if let fc = part["functionCall"] as? [String: Any],
