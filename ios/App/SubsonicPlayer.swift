@@ -157,6 +157,7 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         guard let s = song.coverUrl, let url = URL(string: s) else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data, let img = UIImage(data: data),
+                  img.size.width > 0, img.size.height > 0,
                   SubsonicPlayer.shared.current?.id == song.id else { return }
             let art = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
             DispatchQueue.main.async {

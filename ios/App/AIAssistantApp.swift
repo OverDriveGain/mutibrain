@@ -6,6 +6,9 @@ struct AIAssistantApp: App {
         CrashReporter.install()
         // If the previous run died, tell the server journal what killed it.
         CrashReporter.reportIfCrashed()
+        // Build tag: proves in the journal WHICH build is on the phone (we
+        // once spent a session debugging an old build believed new).
+        GadkVoice.beacon("build-v9-fmtfix")
     }
 
     var body: some Scene {

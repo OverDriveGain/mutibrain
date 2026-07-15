@@ -71,8 +71,19 @@ final class AudioStreamer: NSObject, ObservableObject {
             GadkVoice.beacon("sp-mic-start-granted-\(granted)")
             self.configureSession()
             self.connect()
-            do {
-                try self.startEngine()
+            // Async onto the graph queue: the permission callback can arrive
+            // ON MAIN, and engine.start() can stall for seconds during a route
+            // flap — a synchronous hop would block the main thread (watchdog
+            // kill, which leaves NO crash marker).
+            AudioGraph.q.async { [weak self] in
+                guard let self else { return }
+                do {
+                    try self.startEngineLocked()
+                } catch {
+                    GadkVoice.beacon("sp-mic-engine-FAILED-\(error.localizedDescription)")
+                    NSLog("AudioStreamer engine error: \(error)")
+                    return
+                }
                 Self.anyStreaming = true
                 self.installResilience()
                 DispatchQueue.main.async {
@@ -87,10 +98,7 @@ final class AudioStreamer: NSObject, ObservableObject {
                         GadkVoice.beacon("sp-mic-hb-\(self.hbCount)-kb\(Int(self.sentKB))-eng\(self.engine.isRunning)")
                     }
                 }
-                GadkVoice.beacon("sp-mic-streaming-v8")
-            } catch {
-                GadkVoice.beacon("sp-mic-engine-FAILED-\(error.localizedDescription)")
-                NSLog("AudioStreamer engine error: \(error)")
+                GadkVoice.beacon("sp-mic-streaming-v9")
             }
         }
     }
@@ -225,10 +233,6 @@ final class AudioStreamer: NSObject, ObservableObject {
         client.onText = { text in NSLog("server: \(text)") }
         client.connect()
         ws = client
-    }
-
-    private func startEngine() throws {
-        try AudioGraph.q.sync { try startEngineLocked() }
     }
 
     /// MUST run on AudioGraph.q. Capture-only: the old downlink playerNode

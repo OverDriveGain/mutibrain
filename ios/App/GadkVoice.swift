@@ -589,30 +589,47 @@ final class GadkVoice: ObservableObject {
                 + "-vol-\(Int(engine.mainMixerNode.outputVolume * 100))-rxpeak-\(Int(peak * 1000))")
         }
 
-        // Resample 24 kHz -> hardware rate (see startEngine).
-        var out = buf
-        if let conv = playConverter, let fmt = playOutFormat, fmt.sampleRate != playFormat.sampleRate {
-            let cap = AVAudioFrameCount(Double(frames) * fmt.sampleRate / playFormat.sampleRate + 32)
-            guard let ob = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: cap) else { return }
-            var fed = false
-            var err: NSError?
-            conv.convert(to: ob, error: &err) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true; status.pointee = .haveData; return buf
-            }
-            if err != nil || ob.frameLength == 0 { return }
-            out = ob
-        }
-
-        // Scheduling races the rebuild/restart paths — do it where they run.
-        let buf2 = out
+        // Convert AND schedule on the graph queue. The 2026-07-15 SIGTRAP:
+        // conversion ran on the main thread with the pre-music converter
+        // (48 kHz) while music's AVPlayer flipped the hardware to 44.1 kHz and
+        // the rebuild (on q) rewired the connection — scheduling that stale
+        // 48 kHz buffer trapped with EXC_BREAKPOINT, which is NOT an
+        // NSException and sails straight past ExcCatch. On q, the converter is
+        // always the one matching the live graph, and the format guard below
+        // makes a mismatch a dropped chunk + beacon instead of a dead app.
         AudioGraph.q.async { [weak self] in
             guard let self, self.active else { return }
             if !self.engine.isRunning { self.rebuildPlaybackLocked() }
             guard self.engine.isRunning else { return }  // rebuild failed — drop, don't crash
+
+            var out = buf
+            if let conv = self.playConverter, let fmt = self.playOutFormat,
+               fmt.sampleRate != self.playFormat.sampleRate {
+                let cap = AVAudioFrameCount(
+                    Double(frames) * fmt.sampleRate / self.playFormat.sampleRate + 32)
+                guard let ob = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: cap) else { return }
+                var fed = false
+                var err: NSError?
+                conv.convert(to: ob, error: &err) { _, status in
+                    if fed { status.pointee = .noDataNow; return nil }
+                    fed = true; status.pointee = .haveData; return buf
+                }
+                if err != nil || ob.frameLength == 0 { return }
+                out = ob
+            }
+
+            // The player's connection format is ground truth; a mismatched
+            // scheduleBuffer is an uncatchable trap, so verify — never assume.
+            let want = self.player.outputFormat(forBus: 0)
+            guard out.format.sampleRate == want.sampleRate,
+                  out.format.channelCount == want.channelCount else {
+                Self.beacon("fmt-mismatch-drop-\(Int(out.format.sampleRate))"
+                    + "vs\(Int(want.sampleRate))")
+                return
+            }
             AudioGraph.guarded("gadk-schedule") {
                 if !self.player.isPlaying { self.player.play() }
-                self.player.scheduleBuffer(buf2, completionHandler: nil)
+                self.player.scheduleBuffer(out, completionHandler: nil)
             }
         }
     }
