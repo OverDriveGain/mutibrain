@@ -12,13 +12,14 @@ final class AudioStreamer: NSObject, ObservableObject {
     /// running capture with it ("mic goes off when I close the menu").
     static let shared = AudioStreamer()
 
-    /// Hard-on by default: the recorder starts with the app and keeps running
-    /// until explicitly stopped in Settings; that choice persists.
+    /// STRICTLY OPT-IN (Manar, 2026-07-15): the always-on recorder never
+    /// starts unless the user explicitly enabled it in Settings; that choice
+    /// persists. (It briefly defaulted to on — wrong default for a
+    /// multi-user app: it streamed the mic to the memory server.)
     private static let enabledKey = "micAlwaysOn"
 
     static var alwaysOn: Bool {
-        UserDefaults.standard.object(forKey: enabledKey) == nil
-            || UserDefaults.standard.bool(forKey: enabledKey)
+        UserDefaults.standard.bool(forKey: enabledKey)
     }
 
     /// Called once at app launch: start capture unless the user turned it off.
