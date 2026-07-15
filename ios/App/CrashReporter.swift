@@ -15,8 +15,22 @@ enum CrashReporter {
 
     private static var sigFilePathC: [CChar] = []
 
+    /// Alive-stamp: written every 10 s. iOS's watchdog and the jetsam (OOM)
+    /// killer use SIGKILL, which NO in-process handler can observe — the
+    /// 2026-07-15 music deaths left zero trace. A fresh stamp with no crash
+    /// marker on the next launch is the fingerprint of exactly that.
+    private static let aliveFile = FileManager.default.urls(
+        for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("alive-stamp.txt")
+    private static var aliveTimer: Timer?
+
     static func install() {
         sigFilePathC = sigFile.cString(using: .utf8) ?? []
+
+        aliveTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            try? String(Date().timeIntervalSince1970)
+                .write(to: aliveFile, atomically: true, encoding: .utf8)
+        }
 
         NSSetUncaughtExceptionHandler { e in
             let frames = e.callStackSymbols.prefix(5)
@@ -56,12 +70,24 @@ enum CrashReporter {
             UserDefaults.standard.removeObject(forKey: key)
             GadkVoice.beacon("crash-\(r)")
         }
+        var sawSignal = false
         if let s = try? String(contentsOfFile: sigFile, encoding: .utf8), !s.isEmpty {
             try? FileManager.default.removeItem(atPath: sigFile)
+            sawSignal = true
             // An NSException that reaches the top also aborts (SIGABRT) — the
             // nsexc beacon above already carries the detail, so only report a
             // bare signal when there was no exception record.
             if nsexc == nil { GadkVoice.beacon("crash-\(s)") }
         }
+        // No crash record but a stamp exists -> the previous run ended
+        // without any catchable signal: SIGKILL-class (watchdog / jetsam) or
+        // a user swipe-kill. The stamp age says how long ago it died.
+        if nsexc == nil, !sawSignal,
+           let s = try? String(contentsOf: aliveFile, encoding: .utf8),
+           let last = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            let age = Int(Date().timeIntervalSince1970 - last)
+            GadkVoice.beacon("killed-uncatchable-lastalive-\(age)s-ago")
+        }
+        try? FileManager.default.removeItem(at: aliveFile)
     }
 }

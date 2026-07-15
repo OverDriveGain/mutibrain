@@ -143,6 +143,18 @@ final class GadkVoice: ObservableObject {
                 }
                 player.stop()
             }
+            // Leave call mode IN ORDER: engine down first, THEN voice
+            // processing off, THEN the session back to .media so music/
+            // recorder return to the normal media-volume domain. If nothing
+            // is using audio at all, release the session entirely.
+            AudioGraph.guarded("gadk-vp-off") {
+                try? engine.inputNode.setVoiceProcessingEnabled(false)
+            }
+            if AudioStreamer.anyStreaming || SubsonicPlayer.isActive {
+                AudioSessionManager.media()
+            } else {
+                AudioSessionManager.deactivate()
+            }
         }
         sendQueue.async { [weak self] in self?.pendingSend.removeAll() }
         tapFired = false
@@ -150,11 +162,9 @@ final class GadkVoice: ObservableObject {
         playDiagSent = false
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
-        // Never deactivate the shared session while the screenpipe mic is
-        // streaming OR music is playing — that would kill capture / playback.
-        if !AudioStreamer.anyStreaming && !SubsonicPlayer.isActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
+        // Session restore/release happens in the q-block above, strictly
+        // AFTER the engine teardown — never from here (racing the graph
+        // queue on session state is what got the app watchdog-killed).
     }
 
     // MARK: - Connect
@@ -164,9 +174,7 @@ final class GadkVoice: ObservableObject {
             let target = Target.from(SharedConfig.load().gadkURL)
             let sid = try await createSession(target: target)
             beacon("session-ok")
-            try configureAudioSession()
-            beacon("audio-session-ok")
-            try startEngine()
+            try startEngine()   // asserts the .conversation session state on q
             beacon("engine-ok")
             openSocket(target: target, sessionId: sid)
             beacon("ws-opening")
@@ -217,13 +225,6 @@ final class GadkVoice: ObservableObject {
 
     // MARK: - Audio engine
 
-    private func configureAudioSession() throws {
-        // Shared, never-switching session (see AudioSessionManager). Mode
-        // .default (not .voiceChat) so music mixes at equal volume instead of
-        // being ducked; AEC is still applied at the engine node below.
-        AudioSessionManager.configure()
-    }
-
     private func startEngine() throws {
         // Serialize with every other graph mutation (AudioStreamer restarts,
         // rebuilds, buffer scheduling) — racing them is what crashed the app.
@@ -231,6 +232,11 @@ final class GadkVoice: ObservableObject {
     }
 
     private func startEngineLocked() throws {
+        // Call mode. iOS ducks other audio (music) under the conversation —
+        // that's the STANDARD behavior we now embrace; .media restores full
+        // music volume when the conversation ends (see stop()).
+        AudioSessionManager.conversation()
+
         let input = engine.inputNode
 
         // CRASH GUARD: installing a tap when the input node has no valid format
@@ -238,24 +244,14 @@ final class GadkVoice: ObservableObject {
         // starting a call while music is playing) crashes hard. Re-assert the
         // session and bail gracefully instead of trapping.
         if input.inputFormat(forBus: 0).sampleRate == 0 || input.inputFormat(forBus: 0).channelCount == 0 {
-            AudioSessionManager.configure()
+            AudioSessionManager.conversation()
             if input.inputFormat(forBus: 0).sampleRate == 0 {
                 Self.beacon("no-input-format-abort")
                 throw NSError(domain: "gadk", code: 3,
                               userInfo: [NSLocalizedDescriptionKey: "no audio input available"])
             }
         }
-        try? input.setVoiceProcessingEnabled(true)   // engine-level AEC
-        // Enabling voice processing silently FLIPS the session mode to
-        // .voiceChat (beacon-proven: cat=PlayAndRecord-mode=VoiceChat), whose
-        // AEC unit DUCKS all other audio — that's why music went quiet even
-        // after the "one shared session" rebuild. iOS 17+ has the sanctioned
-        // knob: keep AEC but tell the VP unit not to duck other audio.
-        if #available(iOS 17.0, *) {
-            input.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
-                    enableAdvancedDucking: false, duckingLevel: .min)
-        }
+        try? input.setVoiceProcessingEnabled(true)   // engine-level AEC (call mode)
 
         let session = AVAudioSession.sharedInstance()
         try? session.overrideOutputAudioPort(.speaker)
@@ -500,24 +496,23 @@ final class GadkVoice: ObservableObject {
                    let args = fc["args"] as? [String: Any], let mv = args["move"] as? String {
                     moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
                 }
-                // Any tool that returns {status:"playing", songs:[...]} -> start
-                // playback. The conversation KEEPS GOING: the shared session
-                // (mode .default) mixes the assistant's voice and the music at
-                // equal volume — no stopping the mic, no muting the reply.
+                // Any tool that returns {status:"playing", songs:[...]} ->
+                // STANDARD HANDOFF (the Siri pattern): the music IS the
+                // answer, so the conversation ENDS — stop() tears the voice
+                // engine down in order on the graph queue (VP off, session
+                // back to .media) and only THEN does the player start, at
+                // full media volume. No mixing, no mid-flight route fight.
                 if let fr = part["functionResponse"] as? [String: Any],
                    let resp = fr["response"] as? [String: Any],
                    (resp["status"] as? String) == "playing",
                    let raw = resp["songs"] {
                     if let data = try? JSONSerialization.data(withJSONObject: raw),
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
-                        Self.beacon("play-music-\(songs.count)-\(AudioSessionManager.describe())")
-                        SubsonicPlayer.shared.play(songs)
-                        // The historical crash window is the first seconds of
-                        // playback — snapshot the session + engines there.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                            guard let self else { return }
-                            Self.beacon("music-t2-\(AudioSessionManager.describe())"
-                                + "-eng\(self.engine.isRunning)-alive")
+                        Self.beacon("play-music-\(songs.count)-handoff")
+                        stop()   // queues the ordered teardown on AudioGraph.q
+                        SubsonicPlayer.shared.play(songs)  // queues AFTER it
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                            Self.beacon("music-t2-\(AudioSessionManager.describe())-alive")
                         }
                     }
                 }

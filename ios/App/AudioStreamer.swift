@@ -69,14 +69,15 @@ final class AudioStreamer: NSObject, ObservableObject {
         requestMicThen { [weak self] granted in
             guard let self, granted else { return }
             GadkVoice.beacon("sp-mic-start-granted-\(granted)")
-            self.configureSession()
             self.connect()
             // Async onto the graph queue: the permission callback can arrive
             // ON MAIN, and engine.start() can stall for seconds during a route
             // flap — a synchronous hop would block the main thread (watchdog
-            // kill, which leaves NO crash marker).
+            // kill, which leaves NO crash marker). The session assert lives
+            // inside the ordered block, and never yanks an active conversation.
             AudioGraph.q.async { [weak self] in
                 guard let self else { return }
+                if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
                 do {
                     try self.startEngineLocked()
                 } catch {
@@ -114,15 +115,15 @@ final class AudioStreamer: NSObject, ObservableObject {
                 engine.inputNode.removeTap(onBus: 0)
                 if engine.isRunning { engine.stop() }
             }
+            // Release the session ONLY if truly nobody needs it — ordered
+            // after the teardown, and never under music or a conversation.
+            if !SubsonicPlayer.isActive && AudioSessionManager.state != .conversation {
+                AudioSessionManager.deactivate()
+            }
         }
         ws?.close()
         ws = nil
         converter = nil
-        // Only drop the session if NOTHING else is using it — deactivating
-        // under a live voice call or playing music kills them.
-        if !SubsonicPlayer.isActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
         DispatchQueue.main.async {
             self.isStreaming = false
             self.connected = false
@@ -145,7 +146,6 @@ final class AudioStreamer: NSObject, ObservableObject {
                 GadkVoice.beacon("sp-mic-interrupted")
             } else {
                 GadkVoice.beacon("sp-mic-interruption-ended")
-                self.configureSession()
                 self.restartEngine("interruption-end")
             }
         })
@@ -164,7 +164,6 @@ final class AudioStreamer: NSObject, ObservableObject {
         ) { [weak self] _ in
             guard let self, Self.anyStreaming else { return }
             GadkVoice.beacon("sp-mic-mediaservices-reset")
-            self.configureSession()
             self.restartEngine("media-reset")
         })
         // Lifecycle beacons: if "went-background" arrives and then NOTHING
@@ -182,14 +181,17 @@ final class AudioStreamer: NSObject, ObservableObject {
             guard let self else { return }
             GadkVoice.beacon("sp-mic-foreground-again-engine-\(self.engine.isRunning)")
             if Self.anyStreaming && !self.engine.isRunning {
-                self.configureSession()
                 self.restartEngine("foreground-revive")
             }
         })
     }
 
-    private func restartEngine(_ why: String) {
+    private func restartEngine(_ why: String, isRetry: Bool = false) {
         AudioGraph.q.async { [self] in
+            guard Self.anyStreaming else { return }
+            // Re-assert the session INSIDE the ordered block (never from the
+            // notification thread) — and never yank an active conversation.
+            if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
             AudioGraph.guarded("sp-restart-teardown") {
                 engine.inputNode.removeTap(onBus: 0)
                 if engine.isRunning { engine.stop() }
@@ -197,9 +199,17 @@ final class AudioStreamer: NSObject, ObservableObject {
             converter = nil                  // formats may have changed — rebuild lazily
             do {
                 try startEngineLocked()
-                GadkVoice.beacon("sp-mic-recovered-\(why)")
+                GadkVoice.beacon("sp-mic-recovered-\(why)\(isRetry ? "-retry" : "")")
             } catch {
                 GadkVoice.beacon("sp-mic-recover-FAILED-\(why)-\(error.localizedDescription)")
+                // Route churn (music starting, VP toggling) makes the input
+                // chain transiently un-initializable (err -10868 / '!ini').
+                // One delayed retry after things settle recovers it.
+                if !isRetry {
+                    AudioGraph.q.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                        self?.restartEngine(why, isRetry: true)
+                    }
+                }
             }
         }
     }
@@ -212,13 +222,6 @@ final class AudioStreamer: NSObject, ObservableObject {
         } else {
             AVAudioSession.sharedInstance().requestRecordPermission { granted in done(granted) }
         }
-    }
-
-    private func configureSession() {
-        // Shared, never-switching session (see AudioSessionManager): one
-        // category app-wide so music, voice, and this recorder coexist and mix
-        // without ducking or the category-switch crash.
-        AudioSessionManager.configure()
     }
 
     private func connect() {

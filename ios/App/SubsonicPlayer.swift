@@ -55,8 +55,7 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         Self.isActive = true
         queue = songs
         index = max(0, min(startAt, songs.count - 1))
-        activateSession()
-        playCurrent()
+        startOrdered()
     }
 
     /// Append to the current queue (or start it if empty).
@@ -69,8 +68,7 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         guard queue.indices.contains(i) else { return }
         Self.isActive = true
         index = i
-        activateSession()
-        playCurrent()
+        startOrdered()
     }
 
     /// Remove a queue entry, keeping playback sensible.
@@ -83,8 +81,15 @@ final class SubsonicPlayer: NSObject, ObservableObject {
     }
 
     func toggle() {
-        if player.timeControlStatus == .playing { player.pause() }
-        else { activateSession(); player.play() }
+        if player.timeControlStatus == .playing {
+            player.pause()
+        } else {
+            Self.isActive = true
+            AudioGraph.q.async {
+                if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
+                DispatchQueue.main.async { self.player.play() }
+            }
+        }
     }
 
     func next() {
@@ -116,12 +121,17 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         updateNowPlaying()
     }
 
-    /// The ONE shared session — same policy the voice + recorder use, so
-    /// nothing switches categories (that switching is what crashed the app and
-    /// what quieted the music). Mode .default -> music MIXES with the assistant
-    /// at equal volume instead of being ducked.
-    private func activateSession() {
-        AudioSessionManager.configure()
+    /// Start playback STRICTLY ORDERED on the audio-graph queue: the session
+    /// assert runs after any in-flight voice-engine teardown (the play_music
+    /// handoff queues stop() first), so music always starts against a settled
+    /// session in the .media state — full media volume, no route fight. If a
+    /// conversation is active (user tapped play mid-call), leave call mode
+    /// alone; iOS ducks the music until the conversation ends.
+    private func startOrdered() {
+        AudioGraph.q.async {
+            if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
+            DispatchQueue.main.async { self.playCurrent() }
+        }
     }
 
     // MARK: - Now Playing / remote transport

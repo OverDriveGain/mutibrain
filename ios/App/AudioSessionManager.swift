@@ -1,30 +1,62 @@
 import AVFoundation
 
-/// ONE audio-session policy for the whole app. Every audio consumer (voice
-/// conversation, screenpipe mic, music) calls `configure()` — nobody sets a
-/// different category. That is the systematic fix for two bugs:
+/// The ONE owner of the app's AVAudioSession, with exactly two states. This
+/// follows the STANDARD iOS pattern (what Siri/Maps do) instead of fighting it:
 ///
-///  1. CRASH when talking after music: previously music set `.playback` (no
-///     input) and then the voice engine installed a mic tap on it → invalid
-///     input format → hard crash. One never-switching category = no crash.
+///  - `.media` (the resting state): playAndRecord + mode .default. The
+///    always-on screenpipe mic keeps its input; music (AVPlayer) plays at FULL
+///    MEDIA VOLUME — in this mode output rides the normal media-volume domain.
 ///
-///  2. QUIET / DUCKED music: the voice path used mode `.voiceChat`, whose
-///     echo-canceller DUCKS every other sound, so music played under a
-///     conversation was quiet. Mode `.default` does NOT duck — the assistant's
-///     TTS and the music MIX at equal volume through the shared output mixer.
-///     (Echo-cancellation for the mic is done at the ENGINE node level via
-///     setVoiceProcessingEnabled, which does not require `.voiceChat`.)
+///  - `.conversation` (only while the user talks to the assistant):
+///    playAndRecord + mode .voiceChat with echo-cancellation on the voice
+///    engine. iOS treats it as a call and DUCKS other audio — so music dips
+///    under the assistant's voice by the system's own standard behavior, and
+///    comes back up when the conversation ends and we return to `.media`.
 ///
-/// `.playAndRecord` supports mic + playback simultaneously; `.defaultToSpeaker`
-/// keeps it loud on the speaker. No `.mixWithOthers` (that made iOS suspend the
-/// app in the background) — our own sounds mix internally regardless.
+/// We deliberately do NOT try to play the assistant's voice and music at full
+/// volume simultaneously: call audio and media audio live in different volume
+/// domains on iOS (the beacons showed vol jumping 100→25 across a mode flip),
+/// and every first-party experience ducks instead of mixing. Standard wins.
+///
+/// RULES: nobody else calls setCategory/setMode. State changes happen on
+/// AudioGraph.q, strictly ordered with engine teardowns (mutating the session
+/// under a live graph is what got the app watchdog-killed).
 enum AudioSessionManager {
-    static func configure() {
+
+    enum State: String { case media, conversation }
+
+    private(set) static var state: State = .media
+
+    /// The resting state — full-media-volume playback + recorder input.
+    static func media() {
+        apply(category: .playAndRecord, mode: .default, state: .media)
+    }
+
+    /// Call mode for the voice conversation. iOS flips to the call-volume
+    /// domain and ducks other audio (that IS the wanted standard behavior).
+    static func conversation() {
+        apply(category: .playAndRecord, mode: .voiceChat, state: .conversation)
+    }
+
+    /// Fully release the session — ONLY when nothing at all is using audio.
+    static func deactivate() {
+        try? AVAudioSession.sharedInstance().setActive(
+            false, options: .notifyOthersOnDeactivation)
+    }
+
+    private static func apply(category: AVAudioSession.Category,
+                              mode: AVAudioSession.Mode, state newState: State) {
         let s = AVAudioSession.sharedInstance()
-        try? s.setCategory(.playAndRecord, mode: .default,
-                           options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
-        try? s.setActive(true)
-        try? s.overrideOutputAudioPort(.speaker)
+        do {
+            try s.setCategory(category, mode: mode,
+                              options: [.defaultToSpeaker, .allowBluetooth,
+                                        .allowBluetoothA2DP])
+            try s.setActive(true)
+        } catch {
+            GadkVoice.beacon("session-\(newState.rawValue)-FAILED-\(error.localizedDescription)")
+        }
+        state = newState
+        GadkVoice.beacon("session-\(newState.rawValue)-\(describe())")
     }
 
     static func describe() -> String {
