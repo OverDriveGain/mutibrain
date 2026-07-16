@@ -134,6 +134,30 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         }
     }
 
+    /// Called when a voice conversation ENDS while music is playing. Leaving
+    /// call mode alone does NOT release iOS's duck on our player — beacons
+    /// showed mode=Default with the output still riding the low ducked path
+    /// until something nudges the audio. Music START never had the problem
+    /// because playCurrent() restarts the player; this applies the same nudge:
+    /// re-assert .media, kick the player, then re-assert once more after the
+    /// route settles (the double-assert is what the working path did).
+    func unduckAfterConversation() {
+        guard Self.isActive else { return }
+        AudioGraph.q.async {
+            AudioSessionManager.media()
+            DispatchQueue.main.async {
+                if self.player.timeControlStatus == .playing {
+                    self.player.pause()
+                    self.player.play()
+                }
+            }
+            AudioGraph.q.asyncAfter(deadline: .now() + 0.8) {
+                AudioSessionManager.media()
+                GadkVoice.beacon("unduck-settled-\(AudioSessionManager.describe())")
+            }
+        }
+    }
+
     // MARK: - Now Playing / remote transport
 
     private func setupRemoteCommands() {

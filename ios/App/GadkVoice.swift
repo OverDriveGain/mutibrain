@@ -155,6 +155,12 @@ final class GadkVoice: ObservableObject {
             } else {
                 AudioSessionManager.deactivate()
             }
+            // Music keeps playing at the DUCKED level after call mode ends
+            // unless the player itself completes the transition (see
+            // unduckAfterConversation) — restore full volume explicitly.
+            if SubsonicPlayer.isActive {
+                DispatchQueue.main.async { SubsonicPlayer.shared.unduckAfterConversation() }
+            }
         }
         sendQueue.async { [weak self] in self?.pendingSend.removeAll() }
         tapFired = false
