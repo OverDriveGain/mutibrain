@@ -41,9 +41,14 @@ enum CrashReporter {
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
             signal(sig) { s in
                 CrashReporter.writeSignalMarker(s)
-                // restore + re-raise so the process still dies normally
                 signal(s, SIG_DFL)
-                raise(s)
+                // For hardware traps (SIGTRAP/SEGV/BUS/ILL/FPE), RETURN: the
+                // faulting instruction re-executes under SIG_DFL and iOS
+                // writes a TRUE crash report with the real stack. Re-raising
+                // (the old behavior) produced .ips files whose every thread
+                // looked idle — it masked the Int16-abs mic crash for a day.
+                // SIGABRT doesn't re-execute; re-raise that one.
+                if s == SIGABRT { raise(s) }
             }
         }
     }

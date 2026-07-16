@@ -8,7 +8,7 @@ struct AIAssistantApp: App {
         CrashReporter.reportIfCrashed()
         // Build tag: proves in the journal WHICH build is on the phone (we
         // once spent a session debugging an old build believed new).
-        GadkVoice.beacon("build-v10-standard-audio")
+        GadkVoice.beacon("build-v11-micfix")
     }
 
     var body: some Scene {

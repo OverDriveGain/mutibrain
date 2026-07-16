@@ -437,9 +437,13 @@ final class GadkVoice: ObservableObject {
         guard out.frameLength > 0, let ch = out.int16ChannelData else { return }
         // Once-a-second mic level log — silence here = permission/route problem.
         micLogFrames += Int(out.frameLength)
-        var peak: Int16 = 0
-        for i in 0..<Int(out.frameLength) { peak = max(peak, abs(ch[0][i])) }
-        micLogPeak = max(micLogPeak, peak)
+        // abs() on Int16 TRAPS for a full-scale negative sample (-32768 has
+        // no positive counterpart) — ONE clipped mic sample crashed the app
+        // mid-conversation (Zohreh's iPhone 16, crash thread = this tap).
+        // Widen to Int32 before abs.
+        var peak: Int32 = 0
+        for i in 0..<Int(out.frameLength) { peak = max(peak, abs(Int32(ch[0][i]))) }
+        micLogPeak = max(micLogPeak, Int16(clamping: peak))
         if micLogFrames >= 16000 {
             NSLog("GadkVoice mic: peak=%d (%@)", micLogPeak, micLogPeak < 200 ? "SILENT?" : "ok")
             Self.beacon("mic-peak-\(micLogPeak)")
