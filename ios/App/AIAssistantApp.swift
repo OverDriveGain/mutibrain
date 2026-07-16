@@ -2,13 +2,17 @@ import SwiftUI
 
 @main
 struct AIAssistantApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
         CrashReporter.install()
-        // If the previous run died, tell the server journal what killed it.
+        // If the previous run died, report what killed it (journal beacon +
+        // a structured POST /report with the death-context breadcrumbs).
         CrashReporter.reportIfCrashed()
         // Build tag: proves in the journal WHICH build is on the phone (we
         // once spent a session debugging an old build believed new).
-        GadkVoice.beacon("build-v11-micfix")
+        GadkVoice.beacon(AppBuild.tag)
+        ReportClient.flush()   // deliver anything still queued from offline runs
     }
 
     var body: some Scene {
@@ -21,6 +25,9 @@ struct AIAssistantApp: App {
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
                 MusicView()
                     .tabItem { Label("Music", systemImage: "music.note") }
+            }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { ReportClient.flush() }  // retry queued reports
             }
         }
     }

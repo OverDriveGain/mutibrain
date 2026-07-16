@@ -75,6 +75,7 @@ final class GadkVoice: ObservableObject {
     /// query string, so they land in the server's access log — readable without
     /// any device tooling. Remove once the voice path is stable.
     static func beacon(_ msg: String) {
+        Breadcrumbs.add(msg)   // every beacon is also crash/bug-report context
         let origin = Target.from(SharedConfig.load().gadkURL).origin
         var c = URLComponents(url: origin.appendingPathComponent("healthz"),
                               resolvingAgainstBaseURL: false)!

@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject private var audio = AudioStreamer.shared
     @State private var showQRLogin = false
+    @State private var showBugReport = false
     @AppStorage("serverBase", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var serverBase: String = SharedConfig.defaultBase
     @AppStorage("token", store: UserDefaults(suiteName: SharedConfig.appGroup))
@@ -76,6 +77,17 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("Support") {
+                    Button {
+                        showBugReport = true
+                    } label: {
+                        Label("Report a problem", systemImage: "ladybug")
+                    }
+                    Text("Sends your description plus the app's recent internal event trail to the server — crashes report themselves automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Whole-device screen") {
                     Text("Tap below, then choose “Start Broadcast”. Capture continues across other apps.")
                         .font(.footnote)
@@ -95,6 +107,9 @@ struct ContentView: View {
             .navigationTitle("AI Assistant")
             .sheet(isPresented: $showQRLogin) {
                 QRLoginView { scanned in gadkURL = scanned }
+            }
+            .sheet(isPresented: $showBugReport) {
+                BugReportView()
             }
         }
     }

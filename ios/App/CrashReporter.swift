@@ -68,30 +68,45 @@ enum CrashReporter {
         close(fd)
     }
 
-    /// Call once at launch, after the beacon channel exists.
+    /// Call once at launch, after the beacon channel exists. The breadcrumb
+    /// trail on disk is still the PREVIOUS run's at this moment — exactly the
+    /// death context — so capture it before this run writes much to it.
     static func reportIfCrashed() {
+        let deathTrail = Breadcrumbs.tail()
         let nsexc = UserDefaults.standard.string(forKey: key)
         if let r = nsexc {
             UserDefaults.standard.removeObject(forKey: key)
             GadkVoice.beacon("crash-\(r)")
+            ReportClient.submit(kind: "crash", reason: r, breadcrumbs: deathTrail)
         }
         var sawSignal = false
         if let s = try? String(contentsOfFile: sigFile, encoding: .utf8), !s.isEmpty {
             try? FileManager.default.removeItem(atPath: sigFile)
             sawSignal = true
             // An NSException that reaches the top also aborts (SIGABRT) — the
-            // nsexc beacon above already carries the detail, so only report a
+            // nsexc report above already carries the detail, so only report a
             // bare signal when there was no exception record.
-            if nsexc == nil { GadkVoice.beacon("crash-\(s)") }
+            if nsexc == nil {
+                GadkVoice.beacon("crash-\(s)")
+                ReportClient.submit(kind: "crash", reason: s, breadcrumbs: deathTrail)
+            }
         }
         // No crash record but a stamp exists -> the previous run ended
         // without any catchable signal: SIGKILL-class (watchdog / jetsam) or
-        // a user swipe-kill. The stamp age says how long ago it died.
+        // a user swipe-kill. The stamp age says how long ago it died. Only
+        // FRESH stamps become reports (an old one is routine suspended-app
+        // cleanup by iOS, not a death worth a report).
         if nsexc == nil, !sawSignal,
            let s = try? String(contentsOf: aliveFile, encoding: .utf8),
            let last = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
             let age = Int(Date().timeIntervalSince1970 - last)
             GadkVoice.beacon("killed-uncatchable-lastalive-\(age)s-ago")
+            if age < 300 {
+                ReportClient.submit(kind: "crash",
+                                    reason: "killed-uncatchable (watchdog/jetsam/swipe) "
+                                        + "last alive \(age)s before relaunch",
+                                    breadcrumbs: deathTrail)
+            }
         }
         try? FileManager.default.removeItem(at: aliveFile)
     }
