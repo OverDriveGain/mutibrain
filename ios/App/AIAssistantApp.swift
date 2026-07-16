@@ -13,6 +13,7 @@ struct AIAssistantApp: App {
         // once spent a session debugging an old build believed new).
         GadkVoice.beacon(AppBuild.tag)
         ReportClient.flush()   // deliver anything still queued from offline runs
+        ChatURLSync.run()      // server-driven Chat tab token (voice /config)
     }
 
     var body: some Scene {
@@ -27,7 +28,10 @@ struct AIAssistantApp: App {
                     .tabItem { Label("Music", systemImage: "music.note") }
             }
             .onChange(of: scenePhase) { phase in
-                if phase == .active { ReportClient.flush() }  // retry queued reports
+                if phase == .active {
+                    ReportClient.flush()  // retry queued reports
+                    ChatURLSync.run()     // pick up server-side chat-token rotations
+                }
             }
         }
     }
