@@ -49,7 +49,7 @@ private struct AgentChatRoot: View {
         } else if store.loading && store.projects.isEmpty {
             ZStack { Theme.background.ignoresSafeArea(); MyMuLoader() }
         } else if let agent = onlyAgent {
-            // Single-agent token (the normal case): straight into the chat.
+            // Single live RELAY agent: straight into its streamed conversation.
             ChatView(sessionId: agent.remoteSessionId
                         ?? agent.projectId.replacingOccurrences(of: "remote:", with: ""),
                      projectId: agent.projectId,
@@ -57,15 +57,32 @@ private struct AgentChatRoot: View {
                      title: agent.displayName,
                      token: appState.token ?? "")
         } else if !store.agents.isEmpty {
-            AgentsView()   // several agents allowed -> pick one
+            AgentsView()   // several relay agents allowed -> pick one
+        } else if let (project, session) = latestLocalSession {
+            // The agent runs as a LOCAL Claude Code project on the MyMu host
+            // (special-agent does since the relay went away) — open its most
+            // recent conversation directly, resuming the same session.
+            ChatView(sessionId: session.id,
+                     projectId: project.projectId,
+                     isRemote: false,
+                     title: project.displayName,
+                     token: appState.token ?? "",
+                     projectPath: project.path)
         } else {
             hint(store.error.map { "Couldn’t reach MyMu: \($0)" }
-                 ?? "No agent is live for this token right now.\nPull to retry from the Agents list, or check the server.")
+                 ?? "No agent is visible for this token right now.\nCheck that the agent is running, then retry.")
         }
     }
 
     private var onlyAgent: Project? {
         store.agents.count == 1 ? store.agents.first : nil
+    }
+
+    /// Newest session of the token's local project (nil if none visible).
+    private var latestLocalSession: (Project, Session)? {
+        guard let p = store.folders.first else { return nil }
+        guard let s = (p.sessions ?? []).max(by: { $0.sortKey < $1.sortKey }) else { return nil }
+        return (p, s)
     }
 
     private func hint(_ text: String) -> some View {
