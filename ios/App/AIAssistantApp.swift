@@ -17,8 +17,7 @@ struct AIAssistantApp: App {
                 PetView()
                     .tabItem { Label("Buddy", systemImage: "mic.fill") }
                     .onAppear { AudioStreamer.shared.autoStartIfEnabled() }
-                ChatView()
-                    .background(Color.black.ignoresSafeArea())   // blend the status-bar strip
+                AgentChatTab()   // native MyMu chat (ios/MyMuChat) — was a WKWebView
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
                 MusicView()
                     .tabItem { Label("Music", systemImage: "music.note") }

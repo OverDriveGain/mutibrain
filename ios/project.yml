@@ -21,6 +21,11 @@ targets:
     sources:
       - App
       - Shared
+      # Vendored native MyMu chat client (from claudecodeui/ios-native) — the
+      # Chat tab. Excludes its standalone-app entry point.
+      - path: MyMuChat
+        excludes:
+          - "**/MyMuApp.swift"
     dependencies:
       - target: ScreenBroadcast
         embed: true
