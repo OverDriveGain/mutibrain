@@ -527,6 +527,25 @@ final class GadkVoice: ObservableObject {
                         }
                     }
                 }
+                // The agent's control_music tool: transport for music that is
+                // ALREADY playing. The conversation continues (music stays
+                // ducked under it); only the player changes state.
+                if let fr = part["functionResponse"] as? [String: Any],
+                   let resp = fr["response"] as? [String: Any],
+                   (resp["status"] as? String) == "music_control",
+                   let action = resp["action"] as? String {
+                    Self.beacon("music-ctl-\(action)")
+                    DispatchQueue.main.async {
+                        switch action {
+                        case "stop": SubsonicPlayer.shared.stopFromVoice()
+                        case "pause": SubsonicPlayer.shared.pauseFromVoice()
+                        case "resume": SubsonicPlayer.shared.resumeFromVoice()
+                        case "next": SubsonicPlayer.shared.next()
+                        case "previous": SubsonicPlayer.shared.prev()
+                        default: break
+                        }
+                    }
+                }
                 // ask_the_brain going out means the pending ledger just grew —
                 // cue an immediate /pending refresh so the chip appears at once.
                 if let fc = part["functionCall"] as? [String: Any],

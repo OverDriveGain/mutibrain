@@ -98,6 +98,32 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         playCurrent()
     }
 
+    // MARK: - Voice transport (control_music tool — explicit verbs, not
+    // toggle, so a stale UI state can't invert what the user asked for)
+
+    func pauseFromVoice() { player.pause() }
+
+    func resumeFromVoice() {
+        guard current != nil else { return }
+        Self.isActive = true
+        AudioGraph.q.async {
+            if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
+            DispatchQueue.main.async { self.player.play() }
+        }
+    }
+
+    /// Full stop: drop the queue AND release the session claim, so the next
+    /// conversation teardown is free to wind the shared session down — and
+    /// unduckAfterConversation() (guarded on isActive) won't restart us.
+    func stopFromVoice() {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        queue = []
+        index = 0
+        Self.isActive = false
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
     func prev() {
         // restart the track if we're >3s in, else go to the previous one
         if player.currentTime().seconds > 3 || index == 0 {
