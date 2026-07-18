@@ -9,6 +9,10 @@ struct PetView: View {
     @StateObject private var voice = GadkVoice()
     @StateObject private var critter = CritterController()
     @State private var showSettings = false
+    /// Swap the full-bleed background between the critter and the shared Spot
+    /// garden. Voice stays live in both, so you can say "walk to Zohreh" from
+    /// the garden and watch it happen.
+    @State private var showSpot = false
 
     private var critterState: String {
         voice.active ? (voice.answering ? "talking" : "listening") : "idle"
@@ -39,8 +43,13 @@ struct PetView: View {
 
     var body: some View {
         ZStack {
-            CritterView(controller: critter, origin: gadkOrigin)
-                .ignoresSafeArea()
+            if showSpot {
+                SpotView(origin: gadkOrigin)
+                    .ignoresSafeArea()
+            } else {
+                CritterView(controller: critter, origin: gadkOrigin)
+                    .ignoresSafeArea()
+            }
 
             VStack(spacing: 14) {
                 header
@@ -90,9 +99,16 @@ struct PetView: View {
     }
 
     private var header: some View {
-        HStack {
-            Text("AI BUDDY").font(.pixel(13)).foregroundStyle(.white.opacity(0.85))
+        HStack(spacing: 16) {
+            Text(showSpot ? "SPOT" : "AI BUDDY")
+                .font(.pixel(13)).foregroundStyle(.white.opacity(0.85))
             Spacer()
+            Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
+                Image(systemName: showSpot ? "person.fill" : "tree.fill")
+                    .font(.title3)
+                    .foregroundStyle(showSpot ? Color(red: 0.62, green: 0.94, blue: 0.75)
+                                              : .white.opacity(0.7))
+            }
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
