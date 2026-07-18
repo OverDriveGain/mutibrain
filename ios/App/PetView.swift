@@ -52,6 +52,11 @@ struct PetView: View {
                         .transition(.scale.combined(with: .opacity))
                 }
 
+                if voice.active {
+                    MicMeter(level: voice.micLevel)
+                        .transition(.opacity)
+                }
+
                 Text(statusLine)
                     .font(.system(.footnote, design: .rounded).weight(.medium))
                     .foregroundStyle(statusColor)
@@ -95,6 +100,27 @@ struct PetView: View {
             }
         }
         .padding(.top, 6)
+    }
+}
+
+// MARK: - Mic meter
+
+/// Simple symmetric equalizer showing live mic loudness — the visible proof
+/// the app hears you while the status line stays a plain "Listening…".
+private struct MicMeter: View {
+    let level: Float
+    private static let mult: [CGFloat] = [0.30, 0.55, 0.80, 1.00, 0.80, 0.55, 0.30]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<Self.mult.count, id: \.self) { i in
+                Capsule()
+                    .fill(.white.opacity(0.85))
+                    .frame(width: 4, height: 4 + 24 * Self.mult[i] * CGFloat(level))
+            }
+        }
+        .frame(height: 30)
+        .animation(.linear(duration: 0.09), value: level)
     }
 }
 

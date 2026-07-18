@@ -32,6 +32,9 @@ final class GadkVoice: ObservableObject {
     /// state (PetView falls back to Listening…/Talking…). A line starting with
     /// ✗ survives stop() so failures stay visible until the next attempt.
     @Published var stageText = ""
+    /// Smoothed mic loudness 0…1 for the on-screen equalizer — the LIVE proof
+    /// the mic hears you while the status stays a simple "Listening…".
+    @Published var micLevel: Float = 0
 
     /// (origin, app, token) for sibling fetches (/pending, /capabilities) —
     /// same parse the voice session itself uses.
@@ -138,7 +141,7 @@ final class GadkVoice: ObservableObject {
     func stop() {
         guard active else { return }
         beacon("stop-called")
-        active = false; answering = false; caption = ""; stageText = ""
+        active = false; answering = false; caption = ""; stageText = ""; micLevel = 0
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
@@ -457,6 +460,12 @@ final class GadkVoice: ObservableObject {
         var peak: Int32 = 0
         for i in 0..<Int(out.frameLength) { peak = max(peak, abs(Int32(ch[0][i]))) }
         micLogPeak = max(micLogPeak, Int16(clamping: peak))
+        // Equalizer feed: fast rise, gentle decay (~12 updates/s from the tap).
+        let lvl = min(Float(1), Float(peak) / 9000)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.micLevel = max(lvl, self.micLevel * 0.72)
+        }
         if micLogFrames >= 16000 {
             NSLog("GadkVoice mic: peak=%d (%@)", micLogPeak, micLogPeak < 200 ? "SILENT?" : "ok")
             Self.beacon("mic-peak-\(micLogPeak)")
@@ -602,12 +611,6 @@ final class GadkVoice: ObservableObject {
                     playPcm(b64)
                 }
             }
-        }
-        // Google transcribing the mic = proof it RECEIVES and understands you.
-        if let it = ev["inputTranscription"] as? [String: Any],
-           let t = it["text"] as? String, !t.isEmpty, !answering {
-            stageText = (it["finished"] as? Bool == true)
-                ? "✓ Heard you — answering…" : "🎧 Hearing you…"
         }
         if let ot = ev["outputTranscription"] as? [String: Any],
            let t = ot["text"] as? String, !t.isEmpty {
