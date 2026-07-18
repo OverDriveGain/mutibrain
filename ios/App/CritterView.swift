@@ -103,6 +103,7 @@ struct CritterView: UIViewRepresentable {
         web.isOpaque = false
         web.backgroundColor = UIColor(red: 0.094, green: 0.071, blue: 0.18, alpha: 1) // #18122e
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator   // target=_blank (file downloads) -> Safari
         controller.webView = web
 
         var comps = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
@@ -130,9 +131,22 @@ struct CritterView: UIViewRepresentable {
 
     /// Re-assert the current state once the page finishes loading, so a state set
     /// before load (or after a reload) isn't lost.
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let controller: CritterController
         init(controller: CritterController) { self.controller = controller }
+
+        /// The Files box opens downloads with target=_blank; a bare WKWebView
+        /// silently drops those. Hand them to Safari (which previews/saves any
+        /// file type) and keep the critter page where it is.
+        func webView(_ webView: WKWebView,
+                     createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction,
+                     windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                UIApplication.shared.open(url)
+            }
+            return nil
+        }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             controller.apply()
             // Re-push feed data after any (re)load — the fresh page starts empty.
