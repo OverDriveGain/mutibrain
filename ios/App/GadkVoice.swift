@@ -27,6 +27,11 @@ final class GadkVoice: ObservableObject {
     @Published var caption = ""         // latest assistant words (this turn)
     @Published var moveRequest: String? // critter move ordered by the agent (perform_move tool)
     @Published var brainDispatched = 0  // bumps when ask_the_brain fires (cue: refresh /pending now)
+    /// Connection/progress feedback line ("✓ Server up — connecting to Google…").
+    /// Native milestones + server ?stages=1 messages feed it; empty = steady
+    /// state (PetView falls back to Listening…/Talking…). A line starting with
+    /// ✗ survives stop() so failures stay visible until the next attempt.
+    @Published var stageText = ""
 
     /// (origin, app, token) for sibling fetches (/pending, /capabilities) —
     /// same parse the voice session itself uses.
@@ -101,6 +106,7 @@ final class GadkVoice: ObservableObject {
     func start() {
         guard !active else { return }
         active = true; caption = ""; answering = false; newAgentTurn = true
+        stageText = "Connecting to server…"
         // A conversation is hands-free — don't let the screen auto-lock and
         // suspend the app mid-talk (session + critter die with it).
         UIApplication.shared.isIdleTimerDisabled = true
@@ -132,7 +138,7 @@ final class GadkVoice: ObservableObject {
     func stop() {
         guard active else { return }
         beacon("stop-called")
-        active = false; answering = false; caption = ""
+        active = false; answering = false; caption = ""; stageText = ""
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
@@ -181,14 +187,19 @@ final class GadkVoice: ObservableObject {
             let target = Target.from(SharedConfig.load().gadkURL)
             let sid = try await createSession(target: target)
             beacon("session-ok")
+            await MainActor.run { stageText = "✓ Server up — starting audio…" }
             try startEngine()   // asserts the .conversation session state on q
             beacon("engine-ok")
             openSocket(target: target, sessionId: sid)
             beacon("ws-opening")
+            await MainActor.run { stageText = "✓ Server up — connecting to Google…" }
         } catch {
             beacon("start-FAILED-\(error.localizedDescription)")
             NSLog("GadkVoice start failed: \(error.localizedDescription)")
-            DispatchQueue.main.async { [weak self] in self?.stop() }
+            DispatchQueue.main.async { [weak self] in
+                self?.stop()
+                self?.stageText = "✗ Couldn't reach the server — check connection, tap to retry"
+            }
         }
     }
 
@@ -222,6 +233,7 @@ final class GadkVoice: ObservableObject {
             .init(name: "user_id", value: userId),
             .init(name: "session_id", value: sessionId),
             .init(name: "modalities", value: "AUDIO"),
+            .init(name: "stages", value: "1"),   // server sends {"mymuStage": ...} feedback
         ]
         if let token = target.token { comps.queryItems?.append(.init(name: "token", value: token)) }
         let task = URLSession.shared.webSocketTask(with: comps.url!)
@@ -480,7 +492,12 @@ final class GadkVoice: ObservableObject {
             case .failure(let err):
                 Self.beacon("ws-FAIL-\(err.localizedDescription)")
                 NSLog("GadkVoice ws receive failed: %@", err.localizedDescription)
-                DispatchQueue.main.async { if self.active { self.stop() } }
+                DispatchQueue.main.async {
+                    if self.active {
+                        self.stop()
+                        self.stageText = "✗ Connection lost — tap to reconnect"
+                    }
+                }
             case .success(let msg):
                 if case .string(let text) = msg {
                     DispatchQueue.main.async { self.handleEvent(text) }
@@ -495,11 +512,35 @@ final class GadkVoice: ObservableObject {
         guard let data = json.data(using: .utf8),
               let ev = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
+        // Server connection-stage feedback (?stages=1) — progress you can SEE
+        // on a slow connection instead of a silent wait.
+        if let st = ev["mymuStage"] as? String {
+            Self.beacon("stage-\(st)")
+            switch st {
+            case "server_connected":  stageText = "✓ Server up — connecting to Google…"
+            case "gemini_connecting": stageText = "✓ Server up · Google connecting…"
+            case "gemini_connected":
+                stageText = "✓ Google connected — just talk"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    guard let self, self.active else { return }
+                    if self.stageText == "✓ Google connected — just talk" { self.stageText = "" }
+                }
+            default: break
+            }
+            return
+        }
+
         if ev["interrupted"] as? Bool == true { flushPlayback() }   // barge-in
 
         if let content = ev["content"] as? [String: Any],
            let parts = content["parts"] as? [[String: Any]] {
             for part in parts {
+                // Any tool call = the assistant is WORKING — show what, so a
+                // long tool run doesn't read as a hang.
+                if let fc = part["functionCall"] as? [String: Any],
+                   let toolName = fc["name"] as? String {
+                    stageText = "⚙️ \(toolName.replacingOccurrences(of: "_", with: " "))…"
+                }
                 // The agent's perform_move tool call is OUR cue: the client is
                 // the effector — forward the move to the critter webview.
                 if let fc = part["functionCall"] as? [String: Any],
@@ -557,9 +598,16 @@ final class GadkVoice: ObservableObject {
                    let b64 = inline["data"] as? String {
                     if !answering { Self.beacon("got-audio") }
                     answering = true
+                    stageText = ""   // the voice itself is the feedback now
                     playPcm(b64)
                 }
             }
+        }
+        // Google transcribing the mic = proof it RECEIVES and understands you.
+        if let it = ev["inputTranscription"] as? [String: Any],
+           let t = it["text"] as? String, !t.isEmpty, !answering {
+            stageText = (it["finished"] as? Bool == true)
+                ? "✓ Heard you — answering…" : "🎧 Hearing you…"
         }
         if let ot = ev["outputTranscription"] as? [String: Any],
            let t = ot["text"] as? String, !t.isEmpty {

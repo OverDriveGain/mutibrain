@@ -14,6 +14,20 @@ struct PetView: View {
         voice.active ? (voice.answering ? "talking" : "listening") : "idle"
     }
 
+    /// Connection-stage feedback wins while present (server up → Google up →
+    /// heard you → tool activity); otherwise the plain state line. A ✗ failure
+    /// line stays visible after stop so the user knows WHY it went quiet.
+    private var statusLine: String {
+        if !voice.stageText.isEmpty { return voice.stageText }
+        return voice.active ? (voice.answering ? "Talking…" : "Listening…") : "Tap to talk"
+    }
+
+    private var statusColor: Color {
+        if voice.stageText.hasPrefix("✗") { return .red.opacity(0.85) }
+        if !voice.stageText.isEmpty { return .white.opacity(0.85) }
+        return .white.opacity(0.6)
+    }
+
     private var gadkOrigin: URL {
         let url = SharedConfig.load().gadkURL
         var c = URLComponents()
@@ -38,9 +52,10 @@ struct PetView: View {
                         .transition(.scale.combined(with: .opacity))
                 }
 
-                Text(voice.active ? (voice.answering ? "Talking…" : "Listening…") : "Tap to talk")
+                Text(statusLine)
                     .font(.system(.footnote, design: .rounded).weight(.medium))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(statusColor)
+                    .animation(.easeInOut(duration: 0.15), value: voice.stageText)
 
                 TalkButton(active: voice.active, answering: voice.answering) { voice.toggle() }
             }
