@@ -592,6 +592,10 @@ final class GadkVoice: ObservableObject {
                         case "resume": SubsonicPlayer.shared.resumeFromVoice()
                         case "next": SubsonicPlayer.shared.next()
                         case "previous": SubsonicPlayer.shared.prev()
+                        case "download":  // "download this song" — save the current track
+                            if let cur = SubsonicPlayer.shared.current {
+                                DownloadStore.shared.download(cur)
+                            }
                         default: break
                         }
                     }

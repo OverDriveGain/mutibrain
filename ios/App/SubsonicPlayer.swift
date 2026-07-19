@@ -12,6 +12,7 @@ struct Song: Identifiable, Codable, Equatable {
     let album: String?
     let duration: Int?
     let streamUrl: String
+    let downloadUrl: String?   // original file (offline saves); older payloads omit it
     let coverUrl: String?
 
     var displayTitle: String { title ?? "Unknown" }
@@ -28,6 +29,8 @@ final class SubsonicPlayer: NSObject, ObservableObject {
     @Published private(set) var queue: [Song] = []
     @Published private(set) var index: Int = 0
     @Published private(set) var isPlaying = false
+    @Published private(set) var position: Double = 0   // seconds into the track
+    @Published private(set) var duration: Double = 0   // track length (0 = unknown yet)
 
     /// True once music owns the audio session — so GadkVoice.stop() won't
     /// deactivate the shared session out from under the music.
@@ -45,6 +48,15 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         ) { [weak self] _ in self?.next() }
         setupRemoteCommands()
         player.addObserver(self, forKeyPath: "timeControlStatus", options: [.new], context: nil)
+        // Progress feed for the Now Playing bar.
+        player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
+        ) { [weak self] t in
+            guard let self else { return }
+            self.position = t.seconds.isFinite ? max(0, t.seconds) : 0
+            let d = self.player.currentItem?.duration.seconds ?? .nan
+            self.duration = d.isFinite && d > 0 ? d : Double(self.current?.duration ?? 0)
+        }
     }
 
     // MARK: - Public control
@@ -69,6 +81,13 @@ final class SubsonicPlayer: NSObject, ObservableObject {
         Self.isActive = true
         index = i
         startOrdered()
+    }
+
+    /// Drag-reorder from the Queue view; the playing song keeps playing.
+    func moveInQueue(from source: IndexSet, to destination: Int) {
+        let playing = current
+        queue.move(fromOffsets: source, toOffset: destination)
+        if let playing, let ni = queue.firstIndex(of: playing) { index = ni }
     }
 
     /// Remove a queue entry, keeping playback sensible.
@@ -141,7 +160,12 @@ final class SubsonicPlayer: NSObject, ObservableObject {
     // MARK: - Engine
 
     private func playCurrent() {
-        guard let song = current, let url = URL(string: song.streamUrl) else { return }
+        guard let song = current else { return }
+        // Offline-first: a downloaded copy plays with no network at all.
+        guard let url = DownloadStore.shared.localURL(song.id) ?? URL(string: song.streamUrl)
+        else { return }
+        position = 0
+        duration = Double(song.duration ?? 0)
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
         player.play()
         updateNowPlaying()
