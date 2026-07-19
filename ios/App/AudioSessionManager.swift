@@ -48,9 +48,17 @@ enum AudioSessionManager {
                               mode: AVAudioSession.Mode, state newState: State) {
         let s = AVAudioSession.sharedInstance()
         do {
+            // A2DP ONLY, never .allowBluetooth (HFP): with .playAndRecord and a
+            // live input, iOS pins Bluetooth to the HANDS-FREE profile so it
+            // can use the headset mic — and then MUSIC plays over the 8/16 kHz
+            // mono phone-call codec (prod beacons: out=BluetoothHFP at
+            // vol=100 = Manar's "low quality / effect on it"). With A2DP-only
+            // the BT output rides the full-band stereo media link and the mic
+            // falls back to the iPhone's built-in mic (AEC works fine with
+            // it). Bonus: no HFP<->A2DP route renegotiation between states —
+            // that churn was the old watchdog-kill zone.
             try s.setCategory(category, mode: mode,
-                              options: [.defaultToSpeaker, .allowBluetooth,
-                                        .allowBluetoothA2DP])
+                              options: [.defaultToSpeaker, .allowBluetoothA2DP])
             try s.setActive(true)
         } catch {
             GadkVoice.beacon("session-\(newState.rawValue)-FAILED-\(error.localizedDescription)")
