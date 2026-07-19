@@ -31,7 +31,7 @@ targets:
         embed: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.aiassistant
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/AIAssistant.entitlements
         # ExcCatch: ObjC NSException-catch shim for AVAudioEngine graph calls
@@ -45,6 +45,6 @@ targets:
       - Shared
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.aiassistant.ScreenBroadcast
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent.ScreenBroadcast
         INFOPLIST_FILE: ScreenBroadcast/Info.plist
         CODE_SIGN_ENTITLEMENTS: ScreenBroadcast/ScreenBroadcast.entitlements
