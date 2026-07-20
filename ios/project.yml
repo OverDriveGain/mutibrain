@@ -11,7 +11,7 @@ settings:
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.0"
-    TARGETED_DEVICE_FAMILY: "1,2"
+    TARGETED_DEVICE_FAMILY: "1"
     GENERATE_INFOPLIST_FILE: NO
 
 targets:
@@ -34,6 +34,11 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent
         INFOPLIST_FILE: App/Info.plist
         CODE_SIGN_ENTITLEMENTS: App/AIAssistant.entitlements
+        # iPhone-only (xcodegen defaults targets to "1,2"; must override here or
+        # the project-level value is ignored and iPad multitasking rules apply).
+        TARGETED_DEVICE_FAMILY: "1"
+        # App icon lives in App/Assets.xcassets/AppIcon.appiconset (single 1024).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # ExcCatch: ObjC NSException-catch shim for AVAudioEngine graph calls
         SWIFT_OBJC_BRIDGING_HEADER: App/BridgingHeader.h
 
@@ -48,3 +53,4 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent.ScreenBroadcast
         INFOPLIST_FILE: ScreenBroadcast/Info.plist
         CODE_SIGN_ENTITLEMENTS: ScreenBroadcast/ScreenBroadcast.entitlements
+        TARGETED_DEVICE_FAMILY: "1"

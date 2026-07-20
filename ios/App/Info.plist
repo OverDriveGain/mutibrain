@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>MyAgent</string>
+    <string>ProAgent</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -30,6 +30,12 @@
     </array>
     <key>UILaunchScreen</key>
     <dict/>
+
+    <!-- Portrait phone app. -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
 
     <!-- Keep recording the mic while backgrounded / locked. -->
     <key>UIBackgroundModes</key>
