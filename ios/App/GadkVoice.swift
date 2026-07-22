@@ -567,13 +567,27 @@ final class GadkVoice: ObservableObject {
                    let resp = fr["response"] as? [String: Any],
                    (resp["status"] as? String) == "playing",
                    let raw = resp["songs"] {
+                    // keep_listening=true (the user asked to keep talking, or the
+                    // request implies a continuing conversation) -> DON'T hand off:
+                    // start the music UNDER the live conversation (iOS ducks it in
+                    // .conversation, like control_music) and leave the mic open.
+                    // Absent/false -> standard Siri handoff: tear the voice engine
+                    // down in order, then play at full media volume.
+                    let keepListening = (resp["keep_listening"] as? Bool) ?? false
                     if let data = try? JSONSerialization.data(withJSONObject: raw),
                        let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty {
-                        Self.beacon("play-music-\(songs.count)-handoff")
-                        stop()   // queues the ordered teardown on AudioGraph.q
-                        SubsonicPlayer.shared.play(songs)  // queues AFTER it
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                            Self.beacon("music-t2-\(AudioSessionManager.describe())-alive")
+                        if keepListening {
+                            Self.beacon("play-music-\(songs.count)-keeplistening")
+                            DispatchQueue.main.async {
+                                SubsonicPlayer.shared.play(songs)  // ducks under the live convo
+                            }
+                        } else {
+                            Self.beacon("play-music-\(songs.count)-handoff")
+                            stop()   // queues the ordered teardown on AudioGraph.q
+                            SubsonicPlayer.shared.play(songs)  // queues AFTER it
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                Self.beacon("music-t2-\(AudioSessionManager.describe())-alive")
+                            }
                         }
                     }
                 }
