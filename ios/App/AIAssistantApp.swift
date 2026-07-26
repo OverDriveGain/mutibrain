@@ -3,6 +3,11 @@ import SwiftUI
 @main
 struct AIAssistantApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    // The subscriber the app is logged in as (tokenized voice URL). Changing
+    // it — QR login or manual edit — rebuilds every tab live via .id() below,
+    // so a fresh login needs NO app restart.
+    @AppStorage("gadkURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var gadkURL: String = SharedConfig.defaultGadk
 
     init() {
         CrashReporter.install()
@@ -26,6 +31,10 @@ struct AIAssistantApp: App {
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right.fill") }
                 MusicView()
                     .tabItem { Label("Music", systemImage: "music.note") }
+            }
+            .id(gadkURL)  // new login → tear down + rebuild all tabs in place
+            .onChange(of: gadkURL) { _ in
+                ChatURLSync.run()  // the Chat tab token follows the new subscriber
             }
             .onChange(of: scenePhase) { phase in
                 if phase == .active {

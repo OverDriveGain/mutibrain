@@ -28,7 +28,7 @@ struct ContentView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    Text("The voice assistant the critter talks to. Scan your QR from the server's admin page, or paste the FULL tokenized URL (app + token). Restart the app after changing.")
+                    Text("The voice assistant the critter talks to. Scan your QR from the server's admin page, or paste the FULL tokenized URL (app + token). Applies immediately — the app refreshes itself.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

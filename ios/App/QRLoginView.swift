@@ -63,13 +63,21 @@ struct QRLoginView: View {
         probe.queryItems = [.init(name: "app", value: app), .init(name: "token", value: token)]
         URLSession.shared.dataTask(with: probe.url!) { _, resp, err in
             DispatchQueue.main.async {
-                busy = false
                 let ok = (resp as? HTTPURLResponse)?.statusCode == 200
                 if ok {
+                    // Success indicator, then the app refreshes itself (the
+                    // root rebuilds on gadkURL change) — no restart needed.
+                    status = "✅ Logged in as \(app) — refreshing…"
                     GadkVoice.beacon("qr-login-ok-\(app)")
                     onLogin(code)
-                    dismiss()
-                } else if let err {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        busy = false
+                        dismiss()
+                    }
+                    return
+                }
+                busy = false
+                if let err {
                     status = "Can't reach the server: \(err.localizedDescription)"
                 } else {
                     status = "Server rejected this code (expired token?) — get a fresh QR from /admin"
