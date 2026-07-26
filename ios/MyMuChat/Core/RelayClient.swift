@@ -12,17 +12,56 @@ import Foundation
 @MainActor
 final class RelayClient: ObservableObject {
     @Published var messages: [ChatMessage] = []
-    @Published var isLoading = false
+    @Published var isLoading = false {
+        didSet {
+            // Date() is only a provisional anchor — the real turn start (the user
+            // prompt's transcript timestamp) replaces it via applyServerTurnStart,
+            // so reopening a mid-turn conversation shows true elapsed, not zero.
+            if isLoading && !oldValue {
+                turnStartedAt = Date(); turnAnchored = false
+                // Baseline for the token counter: the last known context position.
+                turnStartContext = context?.usedTokens
+                turnTokens = nil
+            }
+            if !isLoading { turnStartedAt = nil; turnAnchored = false; turnStartContext = nil; turnTokens = nil }
+        }
+    }
+    /// When the current turn started — drives the elapsed timer on the loader.
+    @Published var turnStartedAt: Date?
+    /// Tokens the context grew since the turn started ("tokens this turn"),
+    /// ticking live off assistant frames' absolute contextTokens field.
+    @Published var turnTokens: Int?
+    private var turnStartContext: Int?
+    /// True once turnStartedAt holds the REAL turn start (local send or server
+    /// transcript timestamp) rather than the provisional "when I noticed" stamp.
+    private var turnAnchored = false
+    /// Armed by send(); the first response frame fires the reply haptic.
+    private var awaitingFirstResponse = false
+
+    private func noteResponseActivity() {
+        if awaitingFirstResponse { awaitingFirstResponse = false; Haptics.firstResponse() }
+    }
     @Published var statusText: String?
     @Published var connected = false
     @Published var pendingPermission: ChatMessage?
     /// Bumped on EVERY content mutation (new message, stream chunk, history swap).
     /// The view follows this — messages.count misses stream growth inside one message.
     @Published var revision = 0
+    /// Context-window fullness from the last history fetch (nil until known).
+    @Published var context: ContextUsage?
 
     private let token: String
+    /// Host this conversation talks to (agent→host pinning); nil = active host.
+    /// The pinned host lands file attachments on the agent's own disk — the
+    /// relay mirrors the turn to every attached host, so viewing works anywhere
+    /// but SENDING must hit the agent's machine.
+    private let origin: String?
     private(set) var sessionId: String
     private let isRemote: Bool
+    /// Remote agent sessions accept messages MID-TURN (the relay routes them
+    /// through the agent's native queue) — the composer uses this to allow
+    /// queueing while the agent is working.
+    var supportsMidTurnSend: Bool { isRemote }
     private let projectPath: String?
     private var task: URLSessionWebSocketTask?
     private var keepAlive: Task<Void, Never>?
@@ -31,11 +70,12 @@ final class RelayClient: ObservableObject {
     private var reconnectAttempts = 0
     private var intentionalClose = false
 
-    init(token: String, sessionId: String, isRemote: Bool, projectPath: String? = nil) {
+    init(token: String, sessionId: String, isRemote: Bool, projectPath: String? = nil, origin: String? = nil) {
         self.token = token
         self.sessionId = sessionId
         self.isRemote = isRemote
         self.projectPath = projectPath
+        self.origin = origin
     }
 
     // MARK: Lifecycle
@@ -47,7 +87,7 @@ final class RelayClient: ObservableObject {
 
     private func openSocket() {
         guard task == nil else { return }
-        let ws = URLSession.shared.webSocketTask(with: Config.webSocketURL(token: token))
+        let ws = URLSession.shared.webSocketTask(with: Config.webSocketURL(token: token, origin: origin))
         task = ws
         ws.resume()
         connected = true
@@ -75,11 +115,21 @@ final class RelayClient: ObservableObject {
         sendJSON(["type": "rc-subscribe", "sessionId": sessionId])
     }
 
+    /// Foreground kick: iOS kills sockets in the background but they look alive
+    /// until the next I/O fails, so returning to the app could sit stale for the
+    /// full backoff. Re-subscribe (or reopen) and reconcile immediately instead.
+    func ensureConnected() {
+        if task == nil { openSocket() } else { subscribe() }
+        reconcile()
+    }
+
     private func scheduleReconnect() {
         guard !intentionalClose else { return }
         task = nil
         reconnectAttempts += 1
-        let delay = min(pow(2.0, Double(reconnectAttempts)), 15.0)
+        // Fast first retries (0.5s, 1s, 2s…) — the old 2s/4s/…/15s curve left
+        // visible dead air after every network blip.
+        let delay = min(0.5 * pow(2.0, Double(reconnectAttempts - 1)), 8.0)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !self.intentionalClose else { return }
@@ -96,13 +146,26 @@ final class RelayClient: ObservableObject {
     func send(_ text: String, attachments: [[String: String]] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        // Images render inline in the bubble; only non-image files fall back to a
+        // "📎 name" chip line.
+        let imageURLs = attachments.compactMap { $0["data"] }.filter { $0.hasPrefix("data:image/") }
+        let otherFiles = attachments.filter { !($0["data"]?.hasPrefix("data:image/") ?? false) }
         var shown = trimmed
-        if !attachments.isEmpty {
-            let names = attachments.compactMap { $0["name"] }.map { "📎 \($0)" }.joined(separator: "\n")
+        if !otherFiles.isEmpty {
+            let names = otherFiles.compactMap { $0["name"] }.map { "📎 \($0)" }.joined(separator: "\n")
             shown = shown.isEmpty ? names : shown + "\n" + names
         }
-        appendOrReplace(ChatMessage(id: "local-\(nextSeq())", kind: "text", role: "user", content: shown))
+        var localMsg = ChatMessage(id: "local-\(nextSeq())", kind: "text", role: "user", content: shown)
+        if !imageURLs.isEmpty { localMsg.images = imageURLs }
+        appendOrReplace(localMsg)
         isLoading = true
+        // A turn started HERE is anchored exactly by the send moment; a mid-turn
+        // queued message must NOT restart the timer (isLoading was already true).
+        turnAnchored = true
+        awaitingFirstResponse = true
+        // iOS kills sockets in the background; a send into a dead one would
+        // silently vanish behind the optimistic bubble. Reopen before sending.
+        if task == nil { openSocket() }
         var options: [String: Any] = [:]
         if isRemote {
             options["sessionId"] = sessionId
@@ -116,7 +179,7 @@ final class RelayClient: ObservableObject {
             if !sessionId.isEmpty { options["sessionId"] = sessionId; options["resume"] = true }
         }
         if !attachments.isEmpty { options["images"] = attachments }
-        sendJSON(["type": "claude-command", "command": trimmed, "options": options])
+        sendJSON(["type": "claude-command", "command": trimmed, "options": options], retryOnce: true)
     }
 
     func answerPermission(requestId: String, allow: Bool) {
@@ -127,6 +190,69 @@ final class RelayClient: ObservableObject {
     func abort() {
         sendJSON(["type": "abort-session", "sessionId": sessionId, "provider": "claude"])
         isLoading = false
+    }
+
+    /// Reconcile the working indicator with the server's live agent status — the
+    /// stream only flips isLoading when a frame ARRIVES, so opening a chat whose
+    /// agent is already mid-turn (quiet inside a long tool call) showed no loader
+    /// at all. Poll-safe: only ever turns the indicator ON; the stream's complete
+    /// (or the server watchdog) turns it off.
+    func syncRunningState(_ api: APIClient) async {
+        guard isRemote else { return }
+        if let st = try? await api.agentStatus(),
+           let mine = st.first(where: { $0.id == sessionId }),
+           mine.running == true {
+            if !isLoading { isLoading = true }
+            // Turn started elsewhere (web, another device, a scheduled run) or
+            // was already running on open: fetch the real start from the
+            // transcript so the timer doesn't restart from zero. Retries on the
+            // next poll until anchored (limit=1 keeps the fetch tiny).
+            if !turnAnchored { await refreshTurnStart(api) }
+        }
+    }
+
+    /// Anchor the elapsed timer to the transcript's turn-start timestamp and
+    /// seed the token counter's baseline when the server provides one.
+    /// Ignored when idle (a stale anchor from a finished turn must not revive).
+    func applyServerTurnStart(_ iso: String?, startContext: Int? = nil) {
+        guard isLoading, let iso, let date = Self.parseISO(iso) else { return }
+        turnStartedAt = date
+        turnAnchored = true
+        if let startContext {
+            turnStartContext = startContext
+            if let current = context?.usedTokens {
+                turnTokens = max(0, current - startContext)
+            }
+        }
+    }
+
+    /// Assistant frames carry the absolute context position; diff against the
+    /// turn baseline for the live counter. Absolute values are replay-safe —
+    /// duplicated frames can never double-count.
+    private func noteContextTokens(_ tokens: Int) {
+        guard isLoading else { return }
+        if turnStartContext == nil { turnStartContext = tokens }
+        turnTokens = max(0, tokens - (turnStartContext ?? tokens))
+        // Keep the header context meter live during the turn too.
+        if let c = context, tokens > c.usedTokens {
+            context = ContextUsage(usedTokens: tokens, windowTokens: c.windowTokens)
+        }
+    }
+
+    /// Fetch just the turn anchor — history with limit=1 still carries
+    /// turnStartedAt (derived server-side from the full event log).
+    private func refreshTurnStart(_ api: APIClient) async {
+        guard let h = try? await api.history(sessionId: sessionId, limit: 1) else { return }
+        if let ctx = h.context { context = ctx }
+        applyServerTurnStart(h.turnStartedAt, startContext: h.turnStartContextTokens)
+    }
+
+    /// Relay timestamps carry microsecond fractions ("…T00:03:53.981039Z") that
+    /// ISO8601DateFormatter rejects — drop the fraction (second precision is
+    /// plenty for an elapsed timer).
+    static func parseISO(_ s: String) -> Date? {
+        let cleaned = s.replacingOccurrences(of: #"\.\d+"#, with: "", options: .regularExpression)
+        return ISO8601DateFormatter().date(from: cleaned)
     }
 
     // MARK: History
@@ -142,8 +268,9 @@ final class RelayClient: ObservableObject {
         guard !isLoading else { return }
         Task { [weak self] in
             guard let self else { return }
-            if let h = try? await APIClient(token: self.token).history(sessionId: self.sessionId) {
+            if let h = try? await APIClient(token: self.token, origin: self.origin).history(sessionId: self.sessionId) {
                 if !self.isLoading { self.setHistory(h.messages) }
+                if let ctx = h.context { self.context = ctx }
             }
         }
     }
@@ -181,14 +308,26 @@ final class RelayClient: ObservableObject {
         let type = obj["type"] as? String
         let kind = obj["kind"] as? String
 
+        // Any non-delta frame must observe the fully-applied stream so ordering
+        // holds (e.g. stream_end / tool_use arriving between coalesced flushes).
+        if kind != "stream_delta" {
+            chunkFlushTask?.cancel()
+            chunkFlushTask = nil
+            flushStreamChunk()
+        }
+
         if type == "session-status" {
             if let processing = obj["isProcessing"] as? Bool { isLoading = processing }
             if let status = obj["status"] as? [String: Any], let t = status["text"] as? String { statusText = t }
             return
         }
 
+        // Live token counter: assistant frames carry the absolute context position.
+        if let ctx = obj["contextTokens"] as? Int { noteContextTokens(ctx) }
+
         switch kind {
         case "stream_delta":
+            noteResponseActivity()
             appendStream(obj["content"] as? String ?? "")
             isLoading = true
         case "stream_end":
@@ -196,6 +335,7 @@ final class RelayClient: ObservableObject {
         case "text":
             streamingId = nil
             let role = obj["role"] as? String ?? "assistant"
+            if role == "assistant" { noteResponseActivity() }
             let body = (obj["displayText"] as? String) ?? (obj["content"] as? String) ?? ""
             if !body.isEmpty {
                 // The relay echoes the user's own message back as a text frame. If we
@@ -214,6 +354,7 @@ final class RelayClient: ObservableObject {
                 }
             }
         case "tool_use":
+            noteResponseActivity()
             var m = ChatMessage(id: messageId(obj), kind: "tool_use", role: "assistant",
                                 toolName: obj["toolName"] as? String)
             if let ti = obj["toolInput"] { m.toolInput = AnyCodable(ti) }
@@ -225,6 +366,7 @@ final class RelayClient: ObservableObject {
             statusText = obj["text"] as? String
             isLoading = true
         case "permission_request":
+            Haptics.attention()
             var m = ChatMessage(id: messageId(obj), kind: "permission_request", role: "assistant",
                                 toolName: obj["toolName"] as? String)
             m.requestId = obj["requestId"] as? String
@@ -239,11 +381,13 @@ final class RelayClient: ObservableObject {
             pendingPermission = nil
         case "error":
             streamingId = nil
+            Haptics.error()
             appendOrReplace(ChatMessage(id: messageId(obj), kind: "error", role: "assistant",
                                         content: obj["content"] as? String, isError: true))
             isLoading = false
         case "complete":
             streamingId = nil
+            if isLoading { Haptics.complete() }
             isLoading = false
             statusText = nil
             scheduleReconcile()
@@ -254,7 +398,29 @@ final class RelayClient: ObservableObject {
 
     // MARK: helpers
 
+    // Stream chunks arrive per-token; publishing `messages` on each one forced a
+    // full SwiftUI re-render per token — long replies made the whole chat crawl
+    // (O(n²): every token re-rendered the entire growing message). Coalesce to
+    // ~12 UI updates/second; `handle` flushes synchronously before any non-delta
+    // frame so ordering is preserved.
+    private var pendingChunk = ""
+    private var chunkFlushTask: Task<Void, Never>?
+
     private func appendStream(_ chunk: String) {
+        pendingChunk += chunk
+        guard chunkFlushTask == nil else { return }
+        chunkFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.chunkFlushTask = nil
+            self.flushStreamChunk()
+        }
+    }
+
+    private func flushStreamChunk() {
+        guard !pendingChunk.isEmpty else { return }
+        let chunk = pendingChunk
+        pendingChunk = ""
         if let sid = streamingId, let idx = messages.firstIndex(where: { $0.id == sid }) {
             messages[idx].content = (messages[idx].content ?? "") + chunk
         } else {
@@ -280,9 +446,21 @@ final class RelayClient: ObservableObject {
 
     private func nextSeq() -> Int { seq += 1; return seq }
 
-    private func sendJSON(_ dict: [String: Any]) {
+    private func sendJSON(_ dict: [String: Any], retryOnce: Bool = false) {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               let str = String(data: data, encoding: .utf8) else { return }
-        task?.send(.string(str)) { _ in }
+        let ws = task
+        ws?.send(.string(str)) { [weak self] error in
+            guard error != nil, retryOnce else { return }
+            // Dead socket (backgrounding kills them): reopen and resend once so
+            // the message the user already sees as sent actually goes out.
+            Task { @MainActor in
+                guard let self else { return }
+                if self.task === ws { self.task = nil }
+                self.openSocket()
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                self.task?.send(.string(str)) { _ in }
+            }
+        }
     }
 }

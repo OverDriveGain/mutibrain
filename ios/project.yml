@@ -2,7 +2,8 @@ name: AIAssistant
 options:
   bundleIdPrefix: com.manarz
   deploymentTarget:
-    iOS: "16.0"
+    # 17.0: the vendored MyMuChat client (claudecodeui/ios-native) targets iOS 17.
+    iOS: "17.0"
   createIntermediateGroups: true
 
 settings:

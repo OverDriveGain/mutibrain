@@ -19,9 +19,12 @@ enum APIError: LocalizedError {
 /// Thin REST client over the same endpoints the web app uses.
 struct APIClient {
     var token: String?
+    /// Per-conversation host override (agent→host pinning): requests go to this
+    /// origin instead of the active account's server. nil = active host.
+    var origin: String? = nil
 
     private func request(_ path: String, method: String = "GET", body: Data? = nil, auth: Bool = true) async throws -> Data {
-        guard let url = URL(string: Config.serverOrigin + path) else { throw APIError.badURL }
+        guard let url = URL(string: (origin ?? Config.serverOrigin) + path) else { throw APIError.badURL }
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = 30
@@ -53,6 +56,16 @@ struct APIClient {
         return try JSONDecoder().decode(LoginResponse.self, from: data)
     }
 
+    struct AgentStatusEntry: Codable { let id: String; let running: Bool?; let connected: Bool? }
+    private struct AgentStatusResponse: Codable { let agents: [AgentStatusEntry] }
+
+    /// Lightweight live status for remote agents ({id, running, connected}) —
+    /// served from a short server cache, safe to poll every few seconds.
+    func agentStatus() async throws -> [AgentStatusEntry] {
+        let data = try await request("/api/projects/agent-status")
+        return try JSONDecoder().decode(AgentStatusResponse.self, from: data).agents
+    }
+
     func projects() async throws -> [Project] {
         let data = try await request("/api/projects")
         return try JSONDecoder().decode(ProjectsEnvelope.self, from: data).projects
@@ -63,9 +76,18 @@ struct APIClient {
         return try JSONDecoder().decode(ProjectsEnvelope.self, from: data).projects
     }
 
-    func files(projectId: String) async throws -> [FileNode] {
+    /// Lazy tree loading: `depth` bounds the server-side walk (cut-off dirs come
+    /// back `truncated`), `path` re-roots it at a subdirectory for on-demand
+    /// expansion — the whole-tree eager walk was multi-MB and crawled on
+    /// network-mounted folders.
+    func files(projectId: String, path: String? = nil, depth: Int = 2) async throws -> [FileNode] {
         let pid = projectId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? projectId
-        let data = try await request("/api/projects/\(pid)/files")
+        var endpoint = "/api/projects/\(pid)/files?depth=\(depth)"
+        if let path, !path.isEmpty {
+            let p = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+            endpoint += "&path=\(p)"
+        }
+        let data = try await request(endpoint)
         return try JSONDecoder().decode([FileNode].self, from: data)
     }
 
@@ -81,5 +103,14 @@ struct APIClient {
         let sid = sessionId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? sessionId
         let data = try await request("/api/providers/sessions/\(sid)/messages?limit=\(limit)&offset=\(offset)")
         return try JSONDecoder().decode(HistoryResponse.self, from: data)
+    }
+
+    /// Agent → host assignments (admin-set on the server): agentKey → host
+    /// origin. Used to route a pinned agent's conversation through the saved
+    /// account matching its host, so file sends land on the agent's machine.
+    func agentHosts() async throws -> [String: String] {
+        struct R: Codable { let assignments: [String: String]? }
+        let data = try await request("/api/agent-hosts")
+        return (try JSONDecoder().decode(R.self, from: data)).assignments ?? [:]
     }
 }
