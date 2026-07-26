@@ -100,7 +100,7 @@ struct PetView: View {
 
     private var header: some View {
         HStack(spacing: 16) {
-            Text(showSpot ? "SPOT" : "AI BUDDY")
+            Text(showSpot ? "SPOT" : AppBuild.version)
                 .font(.pixel(13)).foregroundStyle(.white.opacity(0.85))
             Spacer()
             Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
