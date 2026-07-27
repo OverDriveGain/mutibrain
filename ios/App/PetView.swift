@@ -86,9 +86,18 @@ struct PetView: View {
             critter.startFeeds(origin: t.origin, app: t.app, token: t.token)
         }
         .onDisappear { critter.stopFeeds() }
-        .onChange(of: voice.active) { _ in critter.setState(critterState) }
+        .onChange(of: voice.active) { on in
+            critter.setState(critterState)
+            if !on { critter.setLevel(0) }
+        }
         .onChange(of: voice.answering) { _ in critter.setState(critterState) }
         .onChange(of: voice.connectStage) { _ in critter.setState(critterState) }
+        .onChange(of: voice.micLevel) { lvl in
+            if voice.active && !voice.answering { critter.setLevel(lvl) }
+        }
+        .onChange(of: voice.outLevel) { lvl in
+            if voice.answering { critter.setLevel(lvl) }
+        }
         .onChange(of: voice.brainDispatched) { _ in
             // give the tool a beat to register in the ledger, then show the chip
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { critter.refreshPending() }

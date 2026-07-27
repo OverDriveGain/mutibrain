@@ -39,6 +39,9 @@ final class GadkVoice: ObservableObject {
     /// Smoothed mic loudness 0…1 for the on-screen equalizer — the LIVE proof
     /// the mic hears you while the status stays a simple "Listening…".
     @Published var micLevel: Float = 0
+    /// The assistant's playback loudness 0…1 (mainMixer output tap) — feeds
+    /// the avatar's talking pulse.
+    @Published var outLevel: Float = 0
 
     /// (origin, app, token) for sibling fetches (/pending, /capabilities) —
     /// same parse the voice session itself uses.
@@ -146,7 +149,7 @@ final class GadkVoice: ObservableObject {
     func stop() {
         guard active else { return }
         beacon("stop-called")
-        active = false; answering = false; caption = ""; stageText = ""; connectStage = ""; micLevel = 0
+        active = false; answering = false; caption = ""; stageText = ""; connectStage = ""; micLevel = 0; outLevel = 0
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
@@ -154,6 +157,7 @@ final class GadkVoice: ObservableObject {
             AudioGraph.guarded("gadk-stop") {
                 if engine.isRunning {
                     engine.inputNode.removeTap(onBus: 0)
+                    engine.mainMixerNode.removeTap(onBus: 0)
                     engine.stop()
                 }
                 player.stop()
@@ -318,6 +322,21 @@ final class GadkVoice: ObservableObject {
         guard tapped else {
             throw NSError(domain: "gadk", code: 5,
                           userInfo: [NSLocalizedDescriptionKey: "mic tap install failed"])
+        }
+        // Output tap: the assistant's REAL playback loudness (post-mix), so the
+        // avatar can pulse with the voice as it is actually heard — not with
+        // the (queued-ahead) network buffers.
+        AudioGraph.guarded("gadk-outtap") {
+            engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buf, _ in
+                guard let self, let ch = buf.floatChannelData?.pointee else { return }
+                let n = Int(buf.frameLength)
+                guard n > 0 else { return }
+                var peak: Float = 0
+                var i = 0
+                while i < n { peak = max(peak, abs(ch[i])); i += 16 }  // stride: cheap peak
+                let lvl = min(peak * 2.2, 1)
+                DispatchQueue.main.async { self.outLevel = max(lvl, self.outLevel * 0.75) }
+            }
         }
         engine.prepare()
         try engine.start()

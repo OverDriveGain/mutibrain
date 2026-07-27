@@ -34,6 +34,20 @@ final class CritterController: ObservableObject {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// Live audio level 0…1 into the avatar (mic while the user talks,
+    /// playback while the assistant answers). Throttled: publishers fire at
+    /// audio rate, the JS bridge only needs ~30Hz and visible deltas.
+    private var lastLevelAt: CFAbsoluteTime = 0
+    private var lastLevel: Float = -1
+    func setLevel(_ v: Float) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastLevelAt >= 1.0 / 30.0,
+              abs(v - lastLevel) > 0.015 || (v == 0 && lastLevel != 0) else { return }
+        lastLevelAt = now; lastLevel = v
+        let js = String(format: "window.critter && window.critter.setLevel && window.critter.setLevel(%.3f)", v)
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     // MARK: server feeds — pending brain tasks + capability cards
     // The embed is render-only; the app is the data plane. We poll GET /pending
     // (what was handed to the brain, what's still awaited) and push it into the
