@@ -176,36 +176,27 @@ private struct TalkButton: View {
     let action: () -> Void
     @State private var pulsing = false
 
-    private var gradient: [Color] {
-        active
-            ? [Color(red: 1.00, green: 0.42, blue: 0.42), Color(red: 0.82, green: 0.11, blue: 0.34)]
-            : [Color(red: 0.55, green: 0.45, blue: 1.00), Color(red: 0.33, green: 0.20, blue: 0.85)]
-    }
     private var glow: Color {
         active ? Color(red: 1.0, green: 0.3, blue: 0.4) : Color(red: 0.5, green: 0.35, blue: 1.0)
     }
 
     var body: some View {
+        // Background-less (Manar 2026-07-27): just the symbol, no filled
+        // circle, no glow — a faint expanding ring is the only "live" cue.
         Button(action: action) {
             ZStack {
                 if active {
                     Circle()
-                        .stroke(glow.opacity(0.45), lineWidth: 3)
-                        .frame(width: 76, height: 76)
+                        .stroke(glow.opacity(0.35), lineWidth: 2)
+                        .frame(width: 64, height: 64)
                         .scaleEffect(pulsing ? 1.45 : 1.0)
-                        .opacity(pulsing ? 0 : 0.9)
+                        .opacity(pulsing ? 0 : 0.7)
                 }
-                Circle()
-                    .fill(LinearGradient(colors: gradient,
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 76, height: 76)
-                    .overlay(
-                        Circle().strokeBorder(.white.opacity(0.22), lineWidth: 1)
-                    )
-                    .shadow(color: glow.opacity(0.55), radius: 20, y: 8)
                 Image(systemName: active ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(active ? Color(red: 1.0, green: 0.45, blue: 0.45)
+                                            : .white.opacity(0.85))
+                    .shadow(color: .black.opacity(0.6), radius: 6)
                     .opacity(answering ? 0.75 : 1)
                     .animation(answering
                                ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true)

@@ -553,12 +553,10 @@ final class GadkVoice: ObservableObject {
             case "server_connected":  stageText = "✓ Server up — connecting to Google…"
             case "gemini_connecting": stageText = "✓ Server up · Google connecting…"; connectStage = "loaded99"
             case "gemini_connected":
-                stageText = "✓ Google connected — just talk"
-                connectStage = ""   // truly ready → the ball forms NOW
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                    guard let self, self.active else { return }
-                    if self.stageText == "✓ Google connected — just talk" { self.stageText = "" }
-                }
+                // Straight to "Listening…" — the ball forms at the SAME
+                // moment the label says you can talk (no lingering banner).
+                stageText = ""
+                connectStage = ""
             default: break
             }
             return
