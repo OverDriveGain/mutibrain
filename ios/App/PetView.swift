@@ -58,12 +58,20 @@ struct PetView: View {
             VStack(spacing: 14) {
                 header
 
-                Spacer()
-
+                // What she's saying — quiet words at the top, never covering
+                // the avatar (was a big center-screen speech bubble).
                 if voice.active && !voice.caption.isEmpty {
-                    SpeechBubble(text: voice.caption)
-                        .transition(.scale.combined(with: .opacity))
+                    Text(voice.caption)
+                        .font(.system(.footnote, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .truncationMode(.head)
+                        .frame(maxWidth: .infinity)
+                        .transition(.opacity)
                 }
+
+                Spacer()
 
                 if voice.active {
                     MicMeter(level: voice.micLevel)

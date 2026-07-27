@@ -551,7 +551,7 @@ final class GadkVoice: ObservableObject {
             Self.beacon("stage-\(st)")
             switch st {
             case "server_connected":  stageText = "✓ Server up — connecting to Google…"
-            case "gemini_connecting": stageText = "✓ Server up · Google connecting…"
+            case "gemini_connecting": stageText = "✓ Server up · Google connecting…"; connectStage = "loaded99"
             case "gemini_connected":
                 stageText = "✓ Google connected — just talk"
                 connectStage = ""   // truly ready → the ball forms NOW
