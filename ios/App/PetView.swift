@@ -15,7 +15,11 @@ struct PetView: View {
     @State private var showSpot = false
 
     private var critterState: String {
-        voice.active ? (voice.answering ? "talking" : "listening") : "idle"
+        guard voice.active else { return "idle" }
+        if voice.answering { return "talking" }
+        // while connecting the avatar shows loading progress (the swarm
+        // gathers in stages); "" = truly ready -> listening
+        return voice.connectStage.isEmpty ? "listening" : voice.connectStage
     }
 
     /// Connection-stage feedback wins while present (server up → Google up →
@@ -84,6 +88,7 @@ struct PetView: View {
         .onDisappear { critter.stopFeeds() }
         .onChange(of: voice.active) { _ in critter.setState(critterState) }
         .onChange(of: voice.answering) { _ in critter.setState(critterState) }
+        .onChange(of: voice.connectStage) { _ in critter.setState(critterState) }
         .onChange(of: voice.brainDispatched) { _ in
             // give the tool a beat to register in the ledger, then show the chip
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { critter.refreshPending() }

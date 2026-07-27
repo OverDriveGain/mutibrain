@@ -32,6 +32,10 @@ final class GadkVoice: ObservableObject {
     /// state (PetView falls back to Listening…/Talking…). A line starting with
     /// ✗ survives stop() so failures stay visible until the next attempt.
     @Published var stageText = ""
+    /// Connect progress for the avatar ("loaded25"/"loaded50"/"loaded75"),
+    /// "" once truly ready — the swarm gathers with it and only forms the
+    /// rigid ball when Google is actually connected.
+    @Published var connectStage = ""
     /// Smoothed mic loudness 0…1 for the on-screen equalizer — the LIVE proof
     /// the mic hears you while the status stays a simple "Listening…".
     @Published var micLevel: Float = 0
@@ -110,6 +114,7 @@ final class GadkVoice: ObservableObject {
         guard !active else { return }
         active = true; caption = ""; answering = false; newAgentTurn = true
         stageText = "Connecting to server…"
+        connectStage = "loaded25"
         // A conversation is hands-free — don't let the screen auto-lock and
         // suspend the app mid-talk (session + critter die with it).
         UIApplication.shared.isIdleTimerDisabled = true
@@ -141,7 +146,7 @@ final class GadkVoice: ObservableObject {
     func stop() {
         guard active else { return }
         beacon("stop-called")
-        active = false; answering = false; caption = ""; stageText = ""; micLevel = 0
+        active = false; answering = false; caption = ""; stageText = ""; connectStage = ""; micLevel = 0
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
@@ -190,12 +195,12 @@ final class GadkVoice: ObservableObject {
             let target = Target.from(SharedConfig.load().gadkURL)
             let sid = try await createSession(target: target)
             beacon("session-ok")
-            await MainActor.run { stageText = "✓ Server up — starting audio…" }
+            await MainActor.run { stageText = "✓ Server up — starting audio…"; connectStage = "loaded50" }
             try startEngine()   // asserts the .conversation session state on q
             beacon("engine-ok")
             openSocket(target: target, sessionId: sid)
             beacon("ws-opening")
-            await MainActor.run { stageText = "✓ Server up — connecting to Google…" }
+            await MainActor.run { stageText = "✓ Server up — connecting to Google…"; connectStage = "loaded75" }
         } catch {
             beacon("start-FAILED-\(error.localizedDescription)")
             NSLog("GadkVoice start failed: \(error.localizedDescription)")
@@ -530,6 +535,7 @@ final class GadkVoice: ObservableObject {
             case "gemini_connecting": stageText = "✓ Server up · Google connecting…"
             case "gemini_connected":
                 stageText = "✓ Google connected — just talk"
+                connectStage = ""   // truly ready → the ball forms NOW
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                     guard let self, self.active else { return }
                     if self.stageText == "✓ Google connected — just talk" { self.stageText = "" }
@@ -626,6 +632,7 @@ final class GadkVoice: ObservableObject {
                     if !answering { Self.beacon("got-audio") }
                     answering = true
                     stageText = ""   // the voice itself is the feedback now
+                    connectStage = ""
                     playPcm(b64)
                 }
             }
