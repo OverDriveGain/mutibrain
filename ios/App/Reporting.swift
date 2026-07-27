@@ -4,8 +4,12 @@ import UIKit
 /// Single source for the build tag carried by beacons and reports.
 enum AppBuild {
     static let tag = "v12-reports"
-    /// Human version from the bundle, e.g. "V1.0 (5)" — shown in the Buddy
-    /// header so the installed build is visible at a glance on any phone.
+    /// Friendly name shown in the Buddy header (2026-07-28, Manar: "call it
+    /// version 1"). `tag` still rides on every beacon so the dev side can pin
+    /// down the exact build regardless of this display name.
+    static let name = "version 1"
+    /// Human version from the bundle, e.g. "V1.0 (5)" — kept for reference /
+    /// support (bundle build number at a glance).
     static let version: String = {
         let info = Bundle.main.infoDictionary
         let v = info?["CFBundleShortVersionString"] as? String ?? "?"

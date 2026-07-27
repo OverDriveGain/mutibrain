@@ -22,12 +22,13 @@ struct PetView: View {
         return voice.connectStage.isEmpty ? "listening" : voice.connectStage
     }
 
-    /// Connection-stage feedback wins while present (server up → Google up →
-    /// heard you → tool activity); otherwise the plain state line. A ✗ failure
-    /// line stays visible after stop so the user knows WHY it went quiet.
+    /// Routine status chatter ("Listening…", "Talking…", "Tap to talk", the
+    /// connect stages and ⚙️ tool lines) was REMOVED by request (2026-07-28):
+    /// the equalizer + avatar ARE the feedback now, so the text on top just
+    /// felt like noise. ONLY genuine failures (✗ …) still surface, so sudden
+    /// dead air is always explained.
     private var statusLine: String {
-        if !voice.stageText.isEmpty { return voice.stageText }
-        return voice.active ? (voice.answering ? "Talking…" : "Listening…") : "Tap to talk"
+        voice.stageText.hasPrefix("✗") ? voice.stageText : ""
     }
 
     private var statusColor: Color {
@@ -78,10 +79,13 @@ struct PetView: View {
                         .transition(.opacity)
                 }
 
-                Text(statusLine)
-                    .font(.system(.footnote, design: .rounded).weight(.medium))
-                    .foregroundStyle(statusColor)
-                    .animation(.easeInOut(duration: 0.15), value: voice.stageText)
+                if !statusLine.isEmpty {
+                    Text(statusLine)
+                        .font(.system(.footnote, design: .rounded).weight(.medium))
+                        .foregroundStyle(statusColor)
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.15), value: voice.stageText)
+                }
 
                 TalkButton(active: voice.active, answering: voice.answering) { voice.toggle() }
             }
@@ -122,7 +126,7 @@ struct PetView: View {
 
     private var header: some View {
         HStack(spacing: 16) {
-            Text(showSpot ? "SPOT" : AppBuild.version)
+            Text(showSpot ? "SPOT" : AppBuild.name)
                 .font(.pixel(13)).foregroundStyle(.white.opacity(0.85))
             Spacer()
             Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
