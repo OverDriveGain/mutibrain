@@ -2,8 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- App Group removed: not supported by free (personal-team) provisioning.
-         Re-add com.apple.security.application-groups with a paid Developer
-         Program account to let the broadcast extension share SharedConfig. -->
+    <!-- App Group re-added 2026-09-14 (paid team 7276Y3726M). Lets the broadcast
+         extension read the server/token/agent_id the app writes at runtime, and
+         lets the Screenpipe massam read cross-process capture counters. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.manarz.aiassistant</string>
+    </array>
+    <!-- APNs for agent text-share notifications (2026-09-25). "production" is the
+         TestFlight / App Store environment (matches the server's default
+         MYMU_APNS_ENV=production). For a direct Xcode DEBUG device build, switch
+         this to "development" and set MYMU_APNS_ENV=sandbox server-side.
+         Requires the App ID (com.manarz.myagent) to have Push Notifications
+         enabled in the Apple Developer portal. -->
+    <key>aps-environment</key>
+    <string>production</string>
 </dict>
 </plist>
