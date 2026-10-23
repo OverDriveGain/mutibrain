@@ -9,6 +9,9 @@ struct PetView: View {
     @StateObject private var voice = GadkVoice()
     @StateObject private var critter = CritterController()
     @State private var showSettings = false
+    /// Opened by the web "Screen" massam via the mymuBroadcast bridge — shows the
+    /// native screen-capture sheet (standard broadcast picker + mic) right there.
+    @State private var showScreenpipe = false
     /// Swap the full-bleed background between the critter and the shared Spot
     /// garden. Voice stays live in both, so you can say "walk to Zohreh" from
     /// the garden and watch it happen.
@@ -74,10 +77,8 @@ struct PetView: View {
 
                 Spacer()
 
-                if voice.active {
-                    MicMeter(level: voice.micLevel)
-                        .transition(.opacity)
-                }
+                // Old dots equalizer (MicMeter) REMOVED 2026-07-28 (Manar): the
+                // reacting swarm IS the equalizer now — no redundant native bars.
 
                 if !statusLine.isEmpty {
                     Text(statusLine)
@@ -116,29 +117,52 @@ struct PetView: View {
         }
         .onChange(of: voice.moveRequest) { mv in
             guard let mv, !mv.isEmpty else { return }
-            critter.perform(mv)
+            critter.perform(mv, duration: voice.moveDuration)
             voice.moveRequest = nil        // re-arm for repeated identical moves
+            voice.moveDuration = nil
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.7), value: voice.active)
         .animation(.easeInOut(duration: 0.2), value: voice.caption)
         .sheet(isPresented: $showSettings) { ContentView() }
+        .sheet(isPresented: $showScreenpipe) {
+            NavigationView { ScreenpipeView() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mymuShowScreenpipe)) { _ in
+            showScreenpipe = true
+        }
+        .onAppear {
+            // Cold launch from the opener's "your screen isn't being recorded"
+            // notification: the tap was handled before this view listened, so
+            // PushNotifications left a flag — land on the capture sheet now.
+            if UserDefaults.standard.bool(forKey: PushNotifications.pendingBroadcastKey) {
+                UserDefaults.standard.removeObject(forKey: PushNotifications.pendingBroadcastKey)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showScreenpipe = true }
+            }
+        }
     }
 
     private var header: some View {
         HStack(spacing: 16) {
-            Text(showSpot ? "SPOT" : AppBuild.name)
+            Text(showSpot ? "SPOT" : AppBuild.header)
                 .font(.pixel(13)).foregroundStyle(.white.opacity(0.85))
             Spacer()
-            Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
-                Image(systemName: showSpot ? "person.fill" : "tree.fill")
-                    .font(.title3)
-                    .foregroundStyle(showSpot ? Color(red: 0.62, green: 0.94, blue: 0.75)
-                                              : .white.opacity(0.7))
-            }
+            // Spot (garden / TEAMWORK) toggle — HIDDEN 2026-07-28 (Manar: not
+            // needed now, but KEEP for teams work). SpotView + showSpot stay
+            // wired below; un-comment this button to bring it back.
+            // Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
+            //     Image(systemName: showSpot ? "person.fill" : "tree.fill")
+            //         .font(.title3)
+            //         .foregroundStyle(showSpot ? Color(red: 0.62, green: 0.94, blue: 0.75)
+            //                                   : .white.opacity(0.7))
+            //         .frame(width: 44, height: 44)
+            //         .contentShape(Rectangle())
+            // }
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.title3)
                     .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: 44, height: 44)      // generous tap target
+                    .contentShape(Rectangle())
             }
         }
         .padding(.top, 6)
@@ -193,7 +217,7 @@ private struct TalkButton: View {
                         .opacity(pulsing ? 0 : 0.7)
                 }
                 Image(systemName: active ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 30, weight: .semibold))
+                    .font(.system(size: 34, weight: .semibold))
                     .foregroundStyle(active ? Color(red: 1.0, green: 0.45, blue: 0.45)
                                             : .white.opacity(0.85))
                     .shadow(color: .black.opacity(0.6), radius: 6)
@@ -202,7 +226,7 @@ private struct TalkButton: View {
                                ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true)
                                : .default, value: answering)
             }
-            .frame(width: 110, height: 110)   // generous hit target
+            .frame(width: 136, height: 136)   // hit target — a bit bigger (Manar 2026-07-28)
         }
         .buttonStyle(.plain)
         .onChange(of: active) { isOn in

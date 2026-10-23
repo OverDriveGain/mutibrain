@@ -29,6 +29,9 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
     // opening the app; "Done" just dismisses. A plain tap opens the app.
     private let reminderCategoryId = "MYMU_REMINDER"
     private let snoozeActionId = "SNOOZE"
+    /// Set when a notification tap must land on the screen-capture sheet; PetView
+    /// consumes it on appear (cold launch from the opener's "start the broadcast").
+    static let pendingBroadcastKey = "mymuPendingBroadcast"
     private let doneActionId = "DONE"
     private let snoozeMinutes = 10.0
     private let tokenKey = "apnsDeviceToken"   // hex, remembered so we can
@@ -181,6 +184,17 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
+        // Opener button pressed while the phone wasn't broadcasting: the widget's
+        // notification sends the user HERE to start it (Manar 2026-10-23). Flag +
+        // post — the flag covers a cold launch (PetView isn't listening yet), the
+        // post covers the warm case.
+        if (info["mymu"] as? String) == "broadcast" {
+            UserDefaults.standard.set(true, forKey: PushNotifications.pendingBroadcastKey)
+            NotificationCenter.default.post(name: .mymuShowScreenpipe, object: nil)
+            GadkVoice.beacon("opener-to-broadcast")
+            completionHandler()
+            return
+        }
         if response.actionIdentifier == snoozeActionId {
             snoozeReminder(text: info["text"] as? String ?? "",
                            body: response.notification.request.content.body,
