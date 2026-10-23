@@ -1,6 +1,21 @@
 import SwiftUI
 import WebKit
 
+/// Posted when the web massam panel asks the app to open the native screen
+/// capture controls (the standard broadcast picker lives natively; a web tile
+/// can't host it, so the "Screen" massam bridges through here). PetView listens.
+extension Notification.Name {
+    static let mymuShowScreenpipe = Notification.Name("mymuShowScreenpipe")
+    /// The embed's keyboard composer opened/closed (userInfo["open"]: Bool) —
+    /// PetView hides the native mic cluster while the user is writing.
+    static let mymuComposing = Notification.Name("mymuComposing")
+    /// The Music massam asks the NATIVE player to play a queue
+    /// (userInfo["songs"]: [[String: Any]], ["startAt"]: Int) …
+    static let mymuPlaySongs = Notification.Name("mymuPlaySongs")
+    /// … or to control what is playing (userInfo["action"]: pause|resume|next|previous).
+    static let mymuMusicControl = Notification.Name("mymuMusicControl")
+}
+
 /// The critter — mymu-voice's SDF blend-shell character, rendered by the server's
 /// public embed page (static/critter/embed.html) inside a WKWebView.
 ///
@@ -28,9 +43,17 @@ final class CritterController: ObservableObject {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// One-shot trick (jump/spin/dance/shake) — `move` must already be sanitized.
-    func perform(_ move: String) {
-        let js = "window.critter && window.critter.perform && window.critter.perform('\(move)')"
+    /// One-shot trick (jump/spin/dance/shake) or shape — `move` must already be
+    /// sanitized. `duration` (seconds, from the agent's perform_move tool) holds
+    /// the move/shape on screen that long; nil uses the embed's natural default.
+    func perform(_ move: String, duration: Double? = nil) {
+        let opts: String
+        if let d = duration, d > 0 {
+            opts = String(format: ", { duration: %.2f }", d)
+        } else {
+            opts = ""
+        }
+        let js = "window.critter && window.critter.perform && window.critter.perform('\(move)'\(opts))"
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
@@ -110,12 +133,26 @@ struct CritterView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
+        // JS -> native bridge: the "Screen" massam posts mymuBroadcast to pop the
+        // native broadcast picker (the standard button can't live inside the web
+        // panel). Registered on the shared content controller before the webview.
+        cfg.userContentController.add(context.coordinator, name: "mymuBroadcast")
+        // 2026-10-23: the keyboard composer (hide the mic while writing) and
+        // the Music massam (play through the native player, same queue the
+        // voice tools fill — lock screen / background / AirPlay for free).
+        cfg.userContentController.add(context.coordinator, name: "mymuCompose")
+        cfg.userContentController.add(context.coordinator, name: "mymuMusic")
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.scrollView.isScrollEnabled = false
         web.scrollView.bounces = false
         web.scrollView.pinchGestureRecognizer?.isEnabled = false
+        // Fill under the safe areas so the page (not the webview's bg) reaches
+        // the notch + home-indicator edges, and paint that bg near-black instead
+        // of the old purple — otherwise the purple showed at top & bottom and the
+        // glass tab bar sampled it. (Pairs with viewport-fit=cover in the embed.)
+        web.scrollView.contentInsetAdjustmentBehavior = .never
         web.isOpaque = false
-        web.backgroundColor = UIColor(red: 0.094, green: 0.071, blue: 0.18, alpha: 1) // #18122e
+        web.backgroundColor = UIColor(red: 0.02, green: 0.024, blue: 0.031, alpha: 1) // #050608
         web.navigationDelegate = context.coordinator
         web.uiDelegate = context.coordinator   // target=_blank (file downloads) -> Safari
         controller.webView = web
@@ -145,9 +182,36 @@ struct CritterView: UIViewRepresentable {
 
     /// Re-assert the current state once the page finishes loading, so a state set
     /// before load (or after a reload) isn't lost.
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let controller: CritterController
         init(controller: CritterController) { self.controller = controller }
+
+        /// JS -> native. The web "Screen" massam posts here to open the native
+        /// screen-capture sheet (standard broadcast picker + mic). PetView, which
+        /// owns the presentation state, observes the notification.
+        func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
+            switch message.name {
+            case "mymuBroadcast":
+                NotificationCenter.default.post(name: .mymuShowScreenpipe, object: nil)
+            case "mymuCompose":
+                let open = (message.body as? [String: Any])?["open"] as? Bool ?? false
+                NotificationCenter.default.post(name: .mymuComposing, object: nil,
+                                                userInfo: ["open": open])
+            case "mymuMusic":
+                guard let body = message.body as? [String: Any],
+                      let action = body["action"] as? String else { return }
+                if action == "play", let songs = body["songs"] as? [[String: Any]], !songs.isEmpty {
+                    NotificationCenter.default.post(name: .mymuPlaySongs, object: nil,
+                                                    userInfo: ["songs": songs,
+                                                               "startAt": body["startAt"] as? Int ?? 0])
+                } else {
+                    NotificationCenter.default.post(name: .mymuMusicControl, object: nil,
+                                                    userInfo: ["action": action])
+                }
+            default:
+                break
+            }
+        }
 
         /// The Files box opens downloads with target=_blank; a bare WKWebView
         /// silently drops those. Hand them to Safari (which previews/saves any

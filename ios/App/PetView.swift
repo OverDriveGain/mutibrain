@@ -16,6 +16,10 @@ struct PetView: View {
     /// garden. Voice stays live in both, so you can say "walk to Zohreh" from
     /// the garden and watch it happen.
     @State private var showSpot = false
+    /// The embed's keyboard composer is open (mymuCompose bridge): the big
+    /// native mic gets out of the way of the conversation (Manar 2026-10-23:
+    /// "when I chat with the agent there is a big microphone on the screen").
+    @State private var composing = false
 
     private var critterState: String {
         guard voice.active else { return "idle" }
@@ -88,7 +92,9 @@ struct PetView: View {
                         .animation(.easeInOut(duration: 0.15), value: voice.stageText)
                 }
 
-                TalkButton(active: voice.active, answering: voice.answering) { voice.toggle() }
+                if !composing {
+                    TalkButton(active: voice.active, answering: voice.answering) { voice.toggle() }
+                }
             }
             .padding(.horizontal, 18)
             .padding(.bottom, 14)
@@ -129,6 +135,32 @@ struct PetView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .mymuShowScreenpipe)) { _ in
             showScreenpipe = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mymuComposing)) { n in
+            let open = n.userInfo?["open"] as? Bool ?? false
+            withAnimation(.easeInOut(duration: 0.2)) { composing = open }
+            GadkVoice.beacon(open ? "compose-open" : "compose-close")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mymuPlaySongs)) { n in
+            // The Music massam tapped a song/album/playlist: the native player
+            // takes the queue. During a live conversation the music ducks under
+            // it (like keep_listening); otherwise it just plays.
+            guard let raw = n.userInfo?["songs"] as? [[String: Any]],
+                  let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty
+            else { return }
+            let startAt = n.userInfo?["startAt"] as? Int ?? 0
+            GadkVoice.beacon("massam-play-\(songs.count)")
+            SubsonicPlayer.shared.play(songs, startAt: startAt)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mymuMusicControl)) { n in
+            switch n.userInfo?["action"] as? String {
+            case "pause": SubsonicPlayer.shared.pauseFromVoice()
+            case "resume": SubsonicPlayer.shared.resumeFromVoice()
+            case "next": SubsonicPlayer.shared.next()
+            case "previous": SubsonicPlayer.shared.prev()
+            default: break
+            }
         }
         .onAppear {
             // Cold launch from the opener's "your screen isn't being recorded"

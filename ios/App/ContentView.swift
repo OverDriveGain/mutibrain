@@ -1,19 +1,18 @@
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject private var audio = AudioStreamer.shared
     @State private var showQRLogin = false
     @State private var showBugReport = false
-    @AppStorage("serverBase", store: UserDefaults(suiteName: SharedConfig.appGroup))
-    private var serverBase: String = SharedConfig.defaultBase
-    @AppStorage("token", store: UserDefaults(suiteName: SharedConfig.appGroup))
-    private var token: String = SharedConfig.defaultToken
-    @AppStorage("agentId", store: UserDefaults(suiteName: SharedConfig.appGroup))
-    private var agentId: String = SharedConfig.defaultAgentId
     @AppStorage("gadkURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var gadkURL: String = SharedConfig.defaultGadk
     @AppStorage("chatURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var chatURL: String = SharedConfig.defaultChat
+    // MyMu access (2026-10-23): host + the agent the Chat tab opens; both come
+    // from the voice server's /config and are only shown/overridable here.
+    @AppStorage("mymuHost", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var mymuHost: String = "https://code.kaxtus.com"
+    @AppStorage("mymuAgent", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var mymuAgent: String = "special-agent"
 
     var body: some View {
         NavigationView {
@@ -34,45 +33,22 @@ struct ContentView: View {
                 }
 
                 Section("Chat (MyMu)") {
-                    TextField("https://code.kaxtus.com/?token=…", text: $chatURL)
+                    TextField("https://code.kaxtus.com", text: $mymuHost)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    Text("MyMu agent-view share link for the Chat tab. Paste a token URL to open a different agent's conversation. Restart the app after changing.")
+                    Text("The MyMu host. The Chat tab signs in with your MyMu username and password and opens \(mymuAgent)'s conversation — that's all it needs. Sign out from the person icon in the Chat tab.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                Section("Memory (screenpipe)") {
-                    TextField("http://host:8090", text: $serverBase)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    TextField("agent id", text: $agentId)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    SecureField("Agent token (spk_…)", text: $token)
-                    Text("Screen capture runs in a separate process and uses the values built into the app; these fields are a convenience and apply to the app only.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Microphone") {
-                    HStack {
-                        Circle()
-                            .fill(audio.connected ? .green : .gray)
-                            .frame(width: 10, height: 10)
-                        Text(audio.connected ? "Connected" : "Offline")
-                        Spacer()
-                        Text(String(format: "%.0f KB sent", audio.sentKB))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
+                Section("Memory") {
+                    NavigationLink {
+                        ScreenpipeView()
+                    } label: {
+                        Label("Screenpipe — screen & mic", systemImage: "display.and.arrow.down")
                     }
-                    Button(audio.isStreaming ? "Stop microphone" : "Start microphone") {
-                        audio.isStreaming ? audio.userStop() : audio.userStart()
-                    }
-                    .tint(audio.isStreaming ? .red : .accentColor)
-                    Text("The microphone starts automatically with the app and keeps recording (also in the background) until stopped here.")
+                    Text("Tap to start whole-screen broadcast + microphone into your searchable memory.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -84,22 +60,6 @@ struct ContentView: View {
                         Label("Report a problem", systemImage: "ladybug")
                     }
                     Text("Sends your description plus the app's recent internal event trail to the server — crashes report themselves automatically.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Whole-device screen") {
-                    Text("Tap below, then choose “Start Broadcast”. Capture continues across other apps.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    BroadcastPickerView(extensionBundleID: SharedConfig.extensionBundleID)
-                        .frame(height: 56)
-                        .background(Color(.secondarySystemBackground))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                }
-
-                Section {
-                    Text("Start Broadcast to stream whole-device screen frames to screenpipe (the server OCRs + indexes them for search). Capture continues across other apps and pauses only when the display is fully off. Microphone → screenpipe audio is coming next.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -116,3 +76,59 @@ struct ContentView: View {
 }
 
 #Preview { ContentView() }
+
+// MARK: - The Screenpipe massam
+// The capture massam, deliberately LEAN (Manar 2026-09-20: "make it a massam —
+// I click it, I see Screen Broadcast, that's it; no control server"). Server +
+// token are BAKED at build (SharedConfig defaults) — no config UI here, per the
+// rule that a massam box has no settings. Just the two capture switches:
+// whole-device screen (front and centre) and the microphone.
+//
+// NOTE: this build ships WITHOUT the App Group (headless provisioning can't
+// register it), so the cross-process CaptureStats counters are unavailable and
+// the main app genuinely cannot observe the broadcast extension's state. We
+// therefore show NO "Broadcasting/Not broadcasting" label — it would be blind
+// and misleading (it always read "Not broadcasting" even while live). The
+// truthful indicator is iOS's own red status pill. The microphone runs IN this
+// process, so its live status below is real.
+struct ScreenpipeView: View {
+    @ObservedObject private var audio = AudioStreamer.shared
+
+    var body: some View {
+        Form {
+            // ---- SCREEN (the point of this massam — first thing you see) ----
+            Section("Screen broadcast") {
+                BroadcastPickerView(extensionBundleID: SharedConfig.extensionBundleID)
+                    .frame(height: 56)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                Text("Tap → “Start Broadcast” (it goes straight to this app now — no app list). Streams your whole screen into searchable memory; keeps going across other apps, pauses only when the display is off. iOS shows a red pill at the top while it’s live.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            // ---- MICROPHONE ------------------------------------------------
+            Section("Microphone") {
+                Toggle("Record microphone", isOn: Binding(
+                    get: { audio.isStreaming },
+                    set: { $0 ? audio.userStart() : audio.userStop() }))
+                statusRow(dot: audio.connected ? .green : .gray,
+                          label: audio.connected ? "Uploading" : (audio.isStreaming ? "Recording" : "Off"),
+                          detail: String(format: "%.0f KB", audio.sentKB))
+                Text("Records continuously (also backgrounded / screen-locked) into your searchable memory. Opt-in; the choice persists.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Screenpipe")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: helpers
+    @ViewBuilder private func statusRow(dot: Color, label: String, detail: String) -> some View {
+        HStack {
+            Circle().fill(dot).frame(width: 10, height: 10)
+            Text(label)
+            Spacer()
+            Text(detail).foregroundStyle(.secondary).monospacedDigit()
+        }
+    }
+}
