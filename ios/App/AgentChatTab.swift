@@ -78,12 +78,14 @@ private struct AgentChatRoot: View {
         .environmentObject(store)
         .task { await configure() }
         .onChange(of: appState.accountEpoch) { _ in Task { await load() } }
-        .onReceive(NotificationCenter.default.publisher(for: .mymuUnauthorized)) { _ in
-            // The saved MyMu token is dead: back to the sign-in (keeps the
-            // legacy fallback untouched).
+        .onChange(of: store.error) { err in
+            // The saved MyMu token is dead (expired / password changed): the
+            // vendored client surfaces it as an HTTP 401 — back to the sign-in.
+            guard signedIn, let err, err.contains("HTTP 401") else { return }
             GadkVoice.beacon("mymu-token-rejected")
             appState.logout()
             store.projects = []
+            store.error = nil
         }
         .preferredColorScheme(.dark)
     }
