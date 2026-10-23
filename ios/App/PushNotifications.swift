@@ -64,8 +64,14 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        // A token from a PREVIOUS install/environment (e.g. TestFlight → dev
+        // build) is dead for this binary: tell the server to drop it so pushes
+        // stop going to a token APNs still accepts but no app receives.
+        if let old = UserDefaults.standard.string(forKey: tokenKey), !old.isEmpty, old != hex {
+            unregisterToken(old)
+        }
         UserDefaults.standard.set(hex, forKey: tokenKey)
-        GadkVoice.beacon("apns-token")
+        GadkVoice.beacon("apns-token-\(apnsEnvironment())")
         postToken(hex)
     }
 
@@ -116,10 +122,41 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
         }.resume()
     }
 
-    /// TestFlight / App Store builds use the production APNs environment; a debug
-    /// build installed straight from Xcode uses sandbox. The embedded provisioning
-    /// profile's `aps-environment` tells us which.
+    private func unregisterToken(_ hex: String) {
+        let t = GadkVoice.feedTarget()
+        guard !t.token.isEmpty, !t.token.contains("__") else { return }
+        var comps = URLComponents(url: t.origin.appendingPathComponent("push/apns/unregister"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [.init(name: "app", value: t.app),
+                            .init(name: "token", value: t.token)]
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["token": hex])
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            GadkVoice.beacon("apns-unreg-\((resp as? HTTPURLResponse)?.statusCode ?? 0)")
+        }.resume()
+    }
+
+    /// Which APNs gateway this binary's tokens belong to. The TRUTH is the
+    /// `aps-environment` in the embedded provisioning profile — "development"
+    /// (sandbox gateway) for any dev-signed install, incl. a Release-configuration
+    /// build installed over devicectl (build 16 reported "production" from the
+    /// old #if DEBUG guess and the server pushed into the void). TestFlight /
+    /// App Store carry "production". Falls back to the build-configuration guess.
     private func apnsEnvironment() -> String {
+        if let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision"),
+           let data = FileManager.default.contents(atPath: path),
+           let text = String(data: data, encoding: .isoLatin1),
+           let range = text.range(of: "<key>aps-environment</key>") {
+            let tail = text[range.upperBound...]
+            if let open = tail.range(of: "<string>"), let close = tail.range(of: "</string>"),
+               open.upperBound <= close.lowerBound {
+                let value = tail[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+                return value == "development" ? "sandbox" : "production"
+            }
+        }
         #if DEBUG
         return "sandbox"
         #else
