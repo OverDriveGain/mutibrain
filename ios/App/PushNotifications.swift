@@ -23,6 +23,14 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
 
     private let categoryId = "MYMU_SHARE"
     private let copyActionId = "COPY"
+    // Reminders (mymu-voice reminder system, 2026-10-23): the server pushes
+    // category MYMU_REMINDER with the reminder `text` + `id`. Two background
+    // actions — "Snooze 10 min" re-schedules it through POST /reminders without
+    // opening the app; "Done" just dismisses. A plain tap opens the app.
+    private let reminderCategoryId = "MYMU_REMINDER"
+    private let snoozeActionId = "SNOOZE"
+    private let doneActionId = "DONE"
+    private let snoozeMinutes = 10.0
     private let tokenKey = "apnsDeviceToken"   // hex, remembered so we can
                                                // re-register when the subscriber changes
 
@@ -41,7 +49,13 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
                                               actions: [copy],
                                               intentIdentifiers: [],
                                               options: [])
-        center.setNotificationCategories([category])
+        let snooze = UNNotificationAction(identifier: snoozeActionId, title: "Snooze 10 min", options: [])
+        let done = UNNotificationAction(identifier: doneActionId, title: "Done", options: [.destructive])
+        let reminder = UNNotificationCategory(identifier: reminderCategoryId,
+                                              actions: [snooze, done],
+                                              intentIdentifiers: [],
+                                              options: [])
+        center.setNotificationCategories([category, reminder])
 
         requestAuthorizationAndRegister()
         return true
@@ -130,6 +144,17 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
+        if response.actionIdentifier == snoozeActionId {
+            snoozeReminder(text: info["text"] as? String ?? "",
+                           body: response.notification.request.content.body,
+                           done: completionHandler)
+            return
+        }
+        if response.actionIdentifier == doneActionId {
+            GadkVoice.beacon("rem-done")
+            completionHandler()
+            return
+        }
         guard response.actionIdentifier == copyActionId else {
             completionHandler()   // default/other → app opens; nothing else to do
             return
@@ -147,6 +172,39 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
             UIPasteboard.general.string = full
             GadkVoice.beacon("apns-copy-full")
             completionHandler()
+        }
+    }
+
+    /// "Snooze 10 min" on a reminder: set the SAME reminder again, ten minutes
+    /// from now, through the shell's reminder system (POST /reminders). Runs in
+    /// the background handler — the app never comes forward.
+    private func snoozeReminder(text: String, body: String, done: @escaping () -> Void) {
+        let t = GadkVoice.feedTarget()
+        let what = text.isEmpty ? body : text
+        guard !what.isEmpty, !t.token.isEmpty, !t.token.contains("__") else { done(); return }
+        var comps = URLComponents(url: t.origin.appendingPathComponent("reminders"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [.init(name: "app", value: t.app),
+                            .init(name: "token", value: t.token)]
+        guard let url = comps.url else { done(); return }
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        let when = fmt.string(from: Date().addingTimeInterval(snoozeMinutes * 60))
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": what, "when": when])
+        let task = URLSession.shared.dataTask(with: req) { _, resp, _ in
+            // fires exactly once — also on cancel (with an error) — so done()
+            // is always called and never twice
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            GadkVoice.beacon("rem-snooze-\(code)")
+            done()
+        }
+        task.resume()
+        // safety: don't hold the background handler open forever
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            if task.state == .running { task.cancel() }
         }
     }
 
