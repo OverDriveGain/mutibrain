@@ -6,6 +6,8 @@ import UIKit
 @MainActor
 enum Haptics {
     static func send() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    /// One detent of a picker-style control (the agent-switcher carousel).
+    static func tick() { UISelectionFeedbackGenerator().selectionChanged() }
     static func firstResponse() { UIImpactFeedbackGenerator(style: .soft).impactOccurred() }
     static func complete() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
     static func attention() { UINotificationFeedbackGenerator().notificationOccurred(.warning) }

@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 /// The agent/project file tree (its working directory). Loads the whole nested
 /// tree in one call; directories drill down, files open a preview. For a
@@ -44,7 +46,7 @@ struct FilesView: View {
                 if $0.isDir != $1.isDir { return $0.isDir && !$1.isDir }
                 return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
-        } catch APIError.http(let code, _) where code == 404 || code == 502 {
+        } catch APIError.http(let code, _, _) where code == 404 || code == 502 {
             error = "Files aren’t available for this agent — it may be running on another host."
         } catch {
             self.error = error.localizedDescription
@@ -55,7 +57,11 @@ struct FilesView: View {
 
 /// One level of the tree. Recurses via NavigationLink into subdirectories.
 /// A level whose contents weren't preloaded (truncated / no children) fetches
-/// itself on appear — lazy per-level loading.
+/// itself on appear — lazy per-level loading. Rows carry a long-press menu
+/// (download without opening, rename, delete, copy path) and the toolbar "+"
+/// uploads into / creates inside THIS folder — the full file-management set
+/// the web file browser has (Manar, 2026-09-29: "download shouldn't need
+/// opening the file first").
 struct FileBrowser: View {
     let title: String
     let projectId: String
@@ -64,12 +70,34 @@ struct FileBrowser: View {
     /// Preloaded children, or nil → fetch `fetchPath` on appear.
     var preloaded: [FileNode]? = nil
     var fetchPath: String? = nil
+    /// This level's own tree path ("" = root) — where uploads/creates land and
+    /// what a post-mutation refresh refetches.
+    var folderPath: String = ""
+
+    private enum CreateKind: String, Identifiable {
+        case file, folder
+        var id: String { rawValue }
+    }
 
     @State private var fetched: [FileNode]? = nil
     @State private var error: String?
     @State private var query = ""
+    // File management state.
+    @State private var showAddDialog = false
+    @State private var uploadPickerPresented = false
+    @State private var uploading = false
+    @State private var creating: CreateKind?
+    @State private var createName = ""
+    @State private var renaming: FileNode?
+    @State private var renameText = ""
+    @State private var deleting: FileNode?
+    @State private var downloadingPath: String?
+    @State private var shareFile: ShareFile?
+    @State private var actionError: String?
 
-    private var nodes: [FileNode]? { preloaded ?? fetched }
+    /// A refetch (post-mutation / pull-to-refresh) overrides the snapshot this
+    /// level was pushed with.
+    private var nodes: [FileNode]? { fetched ?? preloaded }
 
     private func filtered(_ nodes: [FileNode]) -> [FileNode] {
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -77,7 +105,60 @@ struct FileBrowser: View {
         return nodes.filter { $0.name.localizedCaseInsensitiveContains(q) }
     }
 
+    // Presentation bindings extracted — inline Binding(get:set:) constructions
+    // inside a long modifier chain blow up the type-checker.
+    private var creatingPresented: Binding<Bool> {
+        Binding(get: { creating != nil }, set: { if !$0 { creating = nil } })
+    }
+    private var renamingPresented: Binding<Bool> {
+        Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })
+    }
+    private var deletingPresented: Binding<Bool> {
+        Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })
+    }
+    private var errorPresented: Binding<Bool> {
+        Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })
+    }
+
     var body: some View {
+        pickerLayer
+            .alert(creating == .folder ? "New folder" : "New file",
+                   isPresented: creatingPresented, actions: createAlertActions)
+            .alert("Rename", isPresented: renamingPresented,
+                   presenting: renaming, actions: renameAlertActions)
+            .alert("Delete \(deleting?.name ?? "")?", isPresented: deletingPresented,
+                   presenting: deleting, actions: deleteAlertActions, message: deleteAlertMessage)
+            .alert("That didn’t work.", isPresented: errorPresented) {
+                Button("OK", role: .cancel) { actionError = nil }
+            } message: {
+                Text(actionError ?? "")
+            }
+            .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]) }
+            .task {
+                guard preloaded == nil, fetched == nil, fetchPath != nil else { return }
+                await refresh(showErrorInline: true)
+            }
+    }
+
+    private var pickerLayer: some View {
+        listLayer
+            // Same iPad landmine as the composer "+": a Menu is a popover and
+            // swallows picker presentation as it dismisses — confirmationDialog
+            // finishes dismissing BEFORE its action fires, so pickers present.
+            .confirmationDialog("Add to this folder", isPresented: $showAddDialog, titleVisibility: .visible) {
+                Button("Upload files") { uploadPickerPresented = true }
+                Button("New folder") { createName = ""; creating = .folder }
+                Button("New file") { createName = ""; creating = .file }
+                Button("Cancel", role: .cancel) { }
+            }
+            .fileImporter(isPresented: $uploadPickerPresented,
+                          allowedContentTypes: [UTType.item],
+                          allowsMultipleSelection: true) { result in
+                if case .success(let urls) = result { Task { await upload(urls) } }
+            }
+    }
+
+    private var listLayer: some View {
         Group {
             if let nodes {
                 List(filtered(nodes)) { node in
@@ -87,6 +168,7 @@ struct FileBrowser: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .refreshable { await refresh() }
             } else if let error {
                 EmptyStateView(text: error)
             } else {
@@ -100,34 +182,95 @@ struct FileBrowser: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        .task {
-            guard preloaded == nil, fetched == nil, let fetchPath else { return }
-            do {
-                let tree = try await APIClient(token: token, origin: origin).files(projectId: projectId, path: fetchPath, depth: 2)
-                fetched = tree.sorted {
-                    if $0.isDir != $1.isDir { return $0.isDir && !$1.isDir }
-                    return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if uploading {
+                    ProgressView()
+                } else {
+                    Button { showAddDialog = true } label: {
+                        Image(systemName: "plus").foregroundColor(Theme.primary)
+                    }
+                    .accessibilityIdentifier("files-add")
+                    .accessibilityLabel("Add to this folder")
                 }
-            } catch {
-                self.error = "Couldn’t load this folder."
             }
         }
     }
 
     @ViewBuilder
+    private func createAlertActions() -> some View {
+        TextField("Name", text: $createName)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+        Button("Create") {
+            let kind = creating
+            creating = nil
+            Task { await create(kind: kind ?? .file, name: createName) }
+        }
+        Button("Cancel", role: .cancel) { creating = nil }
+    }
+
+    @ViewBuilder
+    private func renameAlertActions(_ node: FileNode) -> some View {
+        TextField("Name", text: $renameText)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+        Button("Rename") {
+            renaming = nil
+            Task { await rename(node, to: renameText) }
+        }
+        Button("Cancel", role: .cancel) { renaming = nil }
+    }
+
+    @ViewBuilder
+    private func deleteAlertActions(_ node: FileNode) -> some View {
+        Button("Delete", role: .destructive) {
+            deleting = nil
+            Task { await delete(node) }
+        }
+        Button("Cancel", role: .cancel) { deleting = nil }
+    }
+
+    private func deleteAlertMessage(_ node: FileNode) -> some View {
+        Text(node.isDir ? "The folder and everything inside it will be deleted on the server."
+                        : "The file will be deleted on the server.")
+    }
+
+    @ViewBuilder
     private func row(_ node: FileNode) -> some View {
-        if node.isDir {
-            NavigationLink {
-                if node.needsFetch {
-                    FileBrowser(title: node.name, projectId: projectId, token: token, origin: origin, fetchPath: node.path)
-                } else {
-                    FileBrowser(title: node.name, projectId: projectId, token: token, origin: origin, preloaded: node.sortedChildren)
-                }
-            } label: { label(node) }
-        } else {
-            NavigationLink {
-                FilePreviewView(name: node.name, path: node.path, projectId: projectId, token: token, origin: origin)
-            } label: { label(node) }
+        Group {
+            if node.isDir {
+                NavigationLink {
+                    if node.needsFetch {
+                        FileBrowser(title: node.name, projectId: projectId, token: token, origin: origin,
+                                    fetchPath: node.path, folderPath: node.path)
+                    } else {
+                        FileBrowser(title: node.name, projectId: projectId, token: token, origin: origin,
+                                    preloaded: node.sortedChildren, folderPath: node.path)
+                    }
+                } label: { label(node) }
+            } else {
+                NavigationLink {
+                    FilePreviewView(name: node.name, path: node.path, projectId: projectId, token: token, origin: origin)
+                } label: { label(node) }
+            }
+        }
+        .contextMenu {
+            if !node.isDir {
+                Button {
+                    Task { await download(node) }
+                } label: { Label("Download", systemImage: "square.and.arrow.down") }
+            }
+            Button {
+                renameText = node.name
+                renaming = node
+            } label: { Label("Rename", systemImage: "pencil") }
+            Button {
+                UIPasteboard.general.string = node.path
+            } label: { Label("Copy path", systemImage: "doc.on.doc") }
+            Button(role: .destructive) {
+                deleting = node
+            } label: { Label("Delete", systemImage: "trash") }
         }
     }
 
@@ -138,9 +281,108 @@ struct FileBrowser: View {
                 .frame(width: 22)
             Text(n.name).foregroundColor(Theme.text).font(.body).lineLimit(1)
             Spacer()
-            if n.isDir { Image(systemName: "chevron.right").font(.caption2).foregroundColor(Theme.mutedText) }
+            if downloadingPath == n.path {
+                ProgressView().scaleEffect(0.8)
+            } else if n.isDir {
+                Image(systemName: "chevron.right").font(.caption2).foregroundColor(Theme.mutedText)
+            }
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: file management
+
+    private var api: APIClient { APIClient(token: token, origin: origin) }
+
+    /// Refetches THIS level. `showErrorInline` renders the failure as the empty
+    /// state (initial lazy load); otherwise it pops the action alert.
+    private func refresh(showErrorInline: Bool = false) async {
+        do {
+            let tree = try await api.files(projectId: projectId,
+                                           path: folderPath.isEmpty ? nil : folderPath, depth: 2)
+            fetched = tree.sorted {
+                if $0.isDir != $1.isDir { return $0.isDir && !$1.isDir }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        } catch {
+            if showErrorInline { self.error = "Couldn’t load this folder." }
+            else { actionError = "Couldn’t refresh this folder." }
+        }
+    }
+
+    /// Long-press download: bytes → tmp under the real name → share sheet
+    /// (Save to Files / AirDrop / any app) — no need to open the preview first.
+    private func download(_ node: FileNode) async {
+        downloadingPath = node.path
+        defer { downloadingPath = nil }
+        do {
+            let data = try await api.fileData(projectId: projectId, path: node.path)
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent(node.name)
+            try data.write(to: url, options: .atomic)
+            shareFile = ShareFile(url: url)
+        } catch {
+            actionError = "Couldn’t download \(node.name). \(error.localizedDescription)"
+        }
+    }
+
+    private func create(kind: CreateKind, name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        do {
+            try await api.createFileEntry(projectId: projectId, parentPath: folderPath,
+                                          name: trimmed, isDirectory: kind == .folder)
+            await refresh()
+        } catch {
+            actionError = "Couldn’t create \(trimmed). \(error.localizedDescription)"
+        }
+    }
+
+    private func rename(_ node: FileNode, to newName: String) async {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != node.name else { return }
+        do {
+            try await api.renameFileEntry(projectId: projectId, oldPath: node.path, newName: trimmed)
+            await refresh()
+        } catch {
+            actionError = "Couldn’t rename \(node.name). \(error.localizedDescription)"
+        }
+    }
+
+    private func delete(_ node: FileNode) async {
+        do {
+            try await api.deleteFileEntry(projectId: projectId, path: node.path)
+            await refresh()
+        } catch {
+            actionError = "Couldn’t delete \(node.name). \(error.localizedDescription)"
+        }
+    }
+
+    private func upload(_ urls: [URL]) async {
+        uploading = true
+        defer { uploading = false }
+        var files: [(name: String, mime: String, bytes: Data)] = []
+        var unreadable: [String] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                unreadable.append(url.lastPathComponent)
+                continue
+            }
+            let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+            files.append((name: url.lastPathComponent, mime: mime, bytes: data))
+        }
+        do {
+            try await api.uploadProjectFiles(projectId: projectId, targetPath: folderPath, files: files)
+            await refresh()
+            if !unreadable.isEmpty {
+                actionError = "Couldn’t read: \(unreadable.joined(separator: ", "))."
+            }
+        } catch {
+            actionError = "Upload failed. \(error.localizedDescription)"
+        }
     }
 }
 
@@ -155,6 +397,9 @@ struct FilePreviewView: View {
     @State private var text: String?
     @State private var loading = true
     @State private var error: String?
+    @State private var downloading = false
+    @State private var shareFile: ShareFile?
+    @State private var shareFailed = false
 
     private var ext: String { (name as NSString).pathExtension.lowercased() }
     private var isImage: Bool { ["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp"].contains(ext) }
@@ -186,7 +431,40 @@ struct FilePreviewView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(Theme.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if downloading {
+                    ProgressView()
+                } else {
+                    Button { Task { await download() } } label: {
+                        Image(systemName: "square.and.arrow.up").foregroundColor(Theme.primary)
+                    }
+                    .accessibilityLabel("Download and share this file")
+                }
+            }
+        }
+        .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]) }
+        .alert("Couldn’t download the file.", isPresented: $shareFailed) {
+            Button("OK", role: .cancel) {}
+        }
         .task { if isMedia { loading = false } else { await load() } }
+    }
+
+    /// Fetch the raw bytes, park them in tmp under the file's real name (the
+    /// share sheet shows that name and keeps the extension), then share.
+    private func download() async {
+        downloading = true
+        do {
+            let data = try await APIClient(token: token, origin: origin).fileData(projectId: projectId, path: path)
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent(name)
+            try data.write(to: url, options: .atomic)
+            shareFile = ShareFile(url: url)
+        } catch {
+            shareFailed = true
+        }
+        downloading = false
     }
 
     @ViewBuilder
@@ -198,7 +476,7 @@ struct FilePreviewView: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             } else if isVideo {
-                VideoBubble(url: url)
+                VideoBubble(url: url, name: name)
             } else {
                 AudioBubble(url: url, name: name)
             }
@@ -213,6 +491,12 @@ struct FilePreviewView: View {
         }
         loading = false
     }
+}
+
+/// Identifiable URL wrapper for `.sheet(item:)`.
+struct ShareFile: Identifiable {
+    let url: URL
+    var id: String { url.path }
 }
 
 func fileIcon(_ name: String) -> String {

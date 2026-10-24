@@ -52,7 +52,12 @@ struct ProjectsView: View {
 
     private func row(_ p: Project) -> some View {
         HStack(spacing: 12) {
-            IconTile(symbol: "folder")
+            VStack(spacing: 3) {
+                IconTile(symbol: "folder")
+                // A folder can hold mixed-harness sessions; badge only when
+                // every session agrees, so the label can't lie about a project.
+                if let h = uniformHarness(p) { HarnessBadge(harness: h) }
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(p.displayName).foregroundColor(Theme.text).font(.body).lineLimit(1)
                 let count = p.sessions?.count ?? 0
@@ -62,5 +67,16 @@ struct ProjectsView: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+
+    /// The project's harness IF unambiguous: all sessions resolve to the same
+    /// one. Mixed or unknown → nil, no badge — never a majority guess.
+    private func uniformHarness(_ p: Project) -> Harness? {
+        let resolved = (p.sessions ?? []).compactMap {
+            Harness(sessionId: $0.id, provider: $0.provider)
+        }
+        guard let first = resolved.first, resolved.count == (p.sessions?.count ?? 0),
+              resolved.allSatisfy({ $0 == first }) else { return nil }
+        return first
     }
 }

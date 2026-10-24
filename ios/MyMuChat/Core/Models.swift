@@ -8,6 +8,23 @@ struct LoginResponse: Codable {
     let user: User
 }
 
+/// A saved login: one server + one user on it. Gmail-style — the app keeps a
+/// list of these and exactly ONE is active at a time; switching swaps the whole
+/// environment (server origin, token, everything reconnects). Tokens live in
+/// the shared Keychain per account; this struct persists in the app-group
+/// UserDefaults so the share extension can offer the same accounts.
+struct SavedAccount: Codable, Identifiable, Equatable {
+    let serverOrigin: String
+    let username: String
+    var id: String { "\(serverOrigin)|\(username)" }
+    /// Short display host, e.g. "code.kaxtus.com".
+    var hostLabel: String {
+        serverOrigin
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+    }
+}
+
 struct User: Codable, Equatable {
     let id: Int
     let username: String
@@ -36,6 +53,10 @@ struct Project: Codable, Identifiable, Equatable, Hashable {
 
 struct Session: Codable, Identifiable, Equatable, Hashable {
     let id: String
+    /// Real for LOCAL sessions (claude/cursor/codex/opencode — each row comes
+    /// from its provider's own store). Remote agent rows hardcode "claude"
+    /// server-side; Harness prefers the session-id prefix for those.
+    let provider: String?
     let title: String?
     let summary: String?
     let name: String?
@@ -90,6 +111,10 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     /// synthetic context) — the person did NOT type it; rendered as a collapsed
     /// context chip on the agent side, never as a user bubble.
     var isInjected: Bool? = nil
+    /// Local-only: sent mid-turn, sitting in the agent's queue until the
+    /// current run finishes. Never comes from the server (absent in history
+    /// JSON); cleared when the turn completes or the echo reconciles.
+    var queued: Bool? = nil
     /// Arbitrary tool input / result / permission payload (rendered richly later).
     var toolInput: AnyCodable? = nil
     var input: AnyCodable? = nil

@@ -71,6 +71,34 @@ final class CritterController: ObservableObject {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    // MARK: stage composition — the chat drawer takes the lower screen
+    // The webview stays full-bleed; the EMBED shifts/scales its canvas layer
+    // (a GPU transform, no resize) so the swarm re-centres in the space the
+    // drawer leaves, and raises its overlay controls by `inset` (the peek
+    // bar). Throttled to ~30Hz with a trailing flush so the last value of a
+    // drag always lands; re-applied after a page (re)load.
+    private var stageJS = ""
+    private var stageFlush: DispatchWorkItem?
+    private var lastStageAt: CFAbsoluteTime = 0
+    func setStage(shift: CGFloat, scale: CGFloat, inset: CGFloat, dragging: Bool) {
+        stageJS = String(format: "window.critter && window.critter.setStage && window.critter.setStage({shift:%.1f,scale:%.3f,inset:%.0f,dragging:%@})",
+                         Double(shift), Double(scale), Double(inset), dragging ? "true" : "false")
+        stageFlush?.cancel()
+        let gap = CFAbsoluteTimeGetCurrent() - lastStageAt
+        if gap >= 1.0 / 30.0 || !dragging {
+            flushStage()
+        } else {
+            let w = DispatchWorkItem { [weak self] in self?.flushStage() }
+            stageFlush = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 30.0 - gap), execute: w)
+        }
+    }
+    fileprivate func flushStage() {
+        guard !stageJS.isEmpty else { return }
+        lastStageAt = CFAbsoluteTimeGetCurrent()
+        webView?.evaluateJavaScript(stageJS, completionHandler: nil)
+    }
+
     // MARK: server feeds — pending brain tasks + capability cards
     // The embed is render-only; the app is the data plane. We poll GET /pending
     // (what was handed to the brain, what's still awaited) and push it into the
@@ -167,8 +195,13 @@ struct CritterView: UIViewRepresentable {
                               resolvingAgainstBaseURL: false)?.queryItems ?? []
         let app = q.first { $0.name == "app" }?.value ?? ""
         let token = q.first { $0.name == "token" }?.value ?? ""
+        // nochat=1 (2026-10-24): the app has its OWN chat — the native MyMu
+        // conversation in the drawer under the swarm — so the embed keeps its
+        // web keyboard composer off. One chat, not two.
         if !app.isEmpty && !token.isEmpty {
-            comps.fragment = "app=\(app)&token=\(token)"
+            comps.fragment = "app=\(app)&token=\(token)&nochat=1"
+        } else {
+            comps.fragment = "nochat=1"
         }
         // Always refetch the page itself — WKWebView happily serves a stale
         // embed.html for days otherwise (the hashed JS assets can still cache).
@@ -230,6 +263,10 @@ struct CritterView: UIViewRepresentable {
             // Re-push feed data after any (re)load — the fresh page starts empty.
             controller.pushCapabilities()
             controller.refreshPending()
+            // The stage (drawer composition) is page state — re-assert it once
+            // the module has set window.critter (async after load).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [controller] in controller.flushStage() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [controller] in controller.flushStage() }
             // Report which embed the webview actually runs (cache diagnosis).
             // Delayed: the page's module script sets window.critter async.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak webView] in

@@ -50,8 +50,9 @@ struct AIAssistantApp: App {
                             AudioStreamer.shared.autoStartIfEnabled()
                         }
                     }
-                AgentChatTab()   // native MyMu chat (ios/MyMuChat) — was a WKWebView
-                    .tabItem { Image(systemName: "bubble.left.and.bubble.right.fill") }
+                // The Chat tab is GONE (2026-10-24): the MyMu conversation with
+                // the brain now lives IN the Buddy screen, as the drawer under
+                // the swarm (PetView / ChatDrawer) — one place, one chat.
                 MusicView()
                     .tabItem { Image(systemName: "music.note") }
             }

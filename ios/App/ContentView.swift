@@ -1,6 +1,10 @@
 import SwiftUI
 
 struct ContentView: View {
+    /// MyMu account shown in the Chat section (nil = not signed in) and the
+    /// sign-out action — the chat drawer has no account menu of its own.
+    var mymuUser: String? = nil
+    var onMyMuSignOut: (() -> Void)? = nil
     @State private var showQRLogin = false
     @State private var showBugReport = false
     @AppStorage("gadkURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
@@ -37,7 +41,14 @@ struct ContentView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    Text("The MyMu host. The Chat tab signs in with your MyMu username and password and opens \(mymuAgent)'s conversation — that's all it needs. Sign out from the person icon in the Chat tab.")
+                    if let u = mymuUser {
+                        HStack {
+                            Label("Signed in as \(u)", systemImage: "person.crop.circle.badge.checkmark")
+                            Spacer()
+                            Button("Sign out", role: .destructive) { onMyMuSignOut?() }
+                        }
+                    }
+                    Text("The MyMu host. The chat under the swarm signs in with your MyMu username and password and opens \(mymuAgent)'s conversation — that's all it needs.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

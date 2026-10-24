@@ -161,7 +161,7 @@ struct DeliveredMediaView: View {
                     .frame(height: 240, alignment: .leading)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
             case "mp4", "mov", "m4v", "webm", "ogv":
-                VideoBubble(url: url)
+                VideoBubble(url: url, name: name)
             case "mp3", "wav", "m4a", "aac", "ogg", "opus", "flac", "oga":
                 AudioBubble(url: url, name: name)
             default:
@@ -180,22 +180,92 @@ struct DeliveredMediaView: View {
 }
 
 /// Holds its AVPlayer in state so body re-evaluations don't reset playback.
+/// The share button downloads the bytes to tmp under the video's real name and
+/// hands the FILE to the share sheet — sharing the streaming URL is useless to
+/// every other app (the token dies with the session), and video was the one
+/// delivered medium with no way off the phone (images have the lightbox).
 struct VideoBubble: View {
     let url: URL
+    /// Filename the share sheet shows; derived from the stream path if omitted.
+    var name: String? = nil
+
     @State private var player: AVPlayer?
+    @State private var downloading = false
+    @State private var shareFile: ShareFile?
+    @State private var shareFailed = false
+
+    private var fileName: String {
+        if let name, !name.isEmpty { return name }
+        let last = url.deletingQuery().lastPathComponent
+        return last.isEmpty || last == "/" ? "video.mp4" : last
+    }
 
     var body: some View {
-        Group {
-            if let player {
-                VideoPlayer(player: player)
-            } else {
-                Color.black
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let player {
+                    VideoPlayer(player: player)
+                } else {
+                    Color.black
+                }
             }
+            Button {
+                Task { await share() }
+            } label: {
+                Group {
+                    if downloading {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                }
+                .frame(width: 32, height: 32)
+                .background(.black.opacity(0.5))
+                .clipShape(Circle())
+            }
+            .padding(8)
+            .disabled(downloading)
+            .accessibilityLabel("Share video")
         }
         .frame(height: 220)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear { if player == nil { player = AVPlayer(url: url) } }
         .onDisappear { player?.pause() }
+        .sheet(item: $shareFile) { ActivitySheet(items: [$0.url]) }
+        .alert("Couldn’t download the video.", isPresented: $shareFailed) {
+            Button("OK", role: .cancel) {}
+        }
+    }
+
+    private func share() async {
+        downloading = true
+        defer { downloading = false }
+        do {
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+                shareFailed = true
+                return
+            }
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("downloads", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dest = dir.appendingPathComponent(fileName)
+            try data.write(to: dest, options: .atomic)
+            shareFile = ShareFile(url: dest)
+        } catch {
+            shareFailed = true
+        }
+    }
+}
+
+private extension URL {
+    /// The URL without its query — the stream URL carries the auth token there,
+    /// and the filename must come off the clean path.
+    func deletingQuery() -> URL {
+        var comps = URLComponents(url: self, resolvingAgainstBaseURL: false)
+        comps?.query = nil
+        return comps?.url ?? self
     }
 }
 
@@ -232,20 +302,32 @@ struct AudioBubble: View {
 struct ImageLightbox: View {
     let image: UIImage
     @Environment(\.dismiss) private var dismiss
+    @State private var sharing = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Color.black.ignoresSafeArea()
             ZoomableImage(image: image) { dismiss() }
                 .ignoresSafeArea()
-            Button { dismiss() } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.white.opacity(0.85), .black.opacity(0.5))
-                    .padding(14)
+            HStack(spacing: 0) {
+                // Sharing the UIImage itself puts "Save Image" in the sheet.
+                Button { sharing = true } label: {
+                    Image(systemName: "square.and.arrow.up.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.white.opacity(0.85), .black.opacity(0.5))
+                        .padding(.vertical, 14)
+                }
+                .accessibilityLabel("Share image")
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.white.opacity(0.85), .black.opacity(0.5))
+                        .padding(14)
+                }
             }
         }
         .statusBarHidden()
+        .sheet(isPresented: $sharing) { ActivitySheet(items: [image]) }
     }
 }
 

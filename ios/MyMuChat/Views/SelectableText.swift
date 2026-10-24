@@ -1,6 +1,39 @@
 import SwiftUI
 import UIKit
 
+/// Process-wide "is the user marking text right now?" signal, fed by every
+/// SelectableText's delegate. The in-chat agent switcher must NOT raise while
+/// a selection is live: distance/velocity thresholds alone can never separate
+/// a fast selection-handle drag from a switch swipe — both are fast horizontal
+/// drags over the transcript (Manar, 2026-09-29, hardening round 2).
+@MainActor
+final class TextSelectionMonitor {
+    static let shared = TextSelectionMonitor()
+
+    /// The row currently holding a non-empty selection. Weak: a LazyVStack
+    /// recycling the row emits no delegate callback, and a dead reference must
+    /// not block the switcher forever.
+    private weak var active: UITextView?
+    /// When the last selection ended — the tap/drag that dismisses a selection
+    /// arrives right after and must not raise the switcher either.
+    private var clearedAt: Date?
+
+    var blocksSwitcher: Bool {
+        if let active, active.selectedRange.length > 0 { return true }
+        if let clearedAt, Date().timeIntervalSince(clearedAt) < 0.6 { return true }
+        return false
+    }
+
+    func selectionChanged(_ textView: UITextView) {
+        if textView.selectedRange.length > 0 {
+            active = textView
+        } else if active === textView {
+            active = nil
+            clearedAt = Date()
+        }
+    }
+}
+
 /// UITextView-backed text so the user can select WORDS and SENTENCES (loupe,
 /// grab handles, partial-range copy) inside chat messages. SwiftUI's `Text` +
 /// `.textSelection(.enabled)` only offers whole-block copy on iOS, which is why
@@ -12,7 +45,15 @@ struct SelectableText: UIViewRepresentable {
     var textColor: UIColor = UIColor(Theme.text)
 
     func makeCoordinator() -> Coordinator { Coordinator() }
-    final class Coordinator { var lastText: String? }
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var lastText: String?
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            // UIKit calls delegates on main; the isolation just isn't typed.
+            MainActor.assumeIsolated {
+                TextSelectionMonitor.shared.selectionChanged(textView)
+            }
+        }
+    }
 
     /// Rendered-markdown cache shared across rows: LazyVStack derenders and
     /// recreates rows while scrolling, and re-parsing every message's markdown on
@@ -35,6 +76,8 @@ struct SelectableText: UIViewRepresentable {
         tv.dataDetectorTypes = [.link]
         tv.adjustsFontForContentSizeCategory = false
         tv.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Selection state feeds TextSelectionMonitor (switcher suppression).
+        tv.delegate = context.coordinator
         return tv
     }
 

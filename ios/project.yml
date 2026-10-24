@@ -45,6 +45,22 @@ targets:
         # ExcCatch: ObjC NSException-catch shim for AVAudioEngine graph calls
         SWIFT_OBJC_BRIDGING_HEADER: App/BridgingHeader.h
 
+  # Screenshot-driven UI tests of the voice <-> chat drawer (simulator only;
+  # built for the Test action, never shipped). See UITests/DrawerUITests.swift.
+  AIAssistantUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: AIAssistant
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: AIAssistant
+        TARGETED_DEVICE_FAMILY: "1"
+
   ScreenBroadcast:
     type: app-extension
     platform: iOS
@@ -79,3 +95,17 @@ targets:
         # Controls (ControlWidget) are iOS 18 API — pin this target to 18 even
         # though the app is 17, so the iOS 18 symbols compile without guards.
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+
+schemes:
+  AIAssistant:
+    build:
+      targets:
+        AIAssistant: all
+        AIAssistantUITests: [test]
+    test:
+      targets:
+        - AIAssistantUITests
+    run:
+      config: Debug
+    archive:
+      config: Release

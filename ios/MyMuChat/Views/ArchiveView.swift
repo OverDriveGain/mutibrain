@@ -54,7 +54,8 @@ struct ArchiveView: View {
                 NavigationLink(value: Route.chat(ChatTarget(
                     sessionId: item.session.id, projectId: item.project.projectId, isRemote: false,
                     title: item.session.displayTitle,
-                    projectPath: item.project.fullPath ?? item.project.path))) {
+                    projectPath: item.project.fullPath ?? item.project.path,
+                    provider: item.session.provider))) {
                     HStack(spacing: 12) {
                         IconTile(symbol: "archivebox", size: 34)
                         VStack(alignment: .leading, spacing: 3) {

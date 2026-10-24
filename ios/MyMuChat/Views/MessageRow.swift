@@ -49,6 +49,8 @@ struct MessageRow: View, Equatable {
             if let d = deliveredFiles { mediaDelivery(d.files, d.caption) } else { toolUse }
         case "tool_result":
             toolResult
+        case "thinking":
+            thinkingRow
         case "error":
             errorRow
         default:
@@ -77,29 +79,46 @@ struct MessageRow: View, Equatable {
             // on the agent side instead (matching the web client).
             InjectedContextChip(body: trimmedBody)
         } else if isUser {
+            // ChatGPT geometry: right-aligned soft bubble, ~80% of the column
+            // at most, 16/10 padding, 22pt continuous corners. No timestamp —
+            // the row carries the message and nothing else (the stamps on
+            // every row were part of what read as "heavy"; Manar 2026-10-23).
             HStack {
-                Spacer(minLength: 32)
+                Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: 6) {
                     if let images = message.images, !images.isEmpty {
                         ForEach(images, id: \.self) { url in
                             DataURLImage(dataURL: url, zoomable: true)
                                 .frame(maxWidth: 260, maxHeight: 260, alignment: .trailing)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.media, style: .continuous))
                         }
                     }
                     if !trimmedBody.isEmpty {
                         MarkdownView(text: trimmedBody)
                             .foregroundColor(Theme.text)
-                            .frame(maxWidth: 310, alignment: .leading)
-                            .padding(.horizontal, 15)
-                            .padding(.vertical, 11)
+                            .frame(maxWidth: 300, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
                             .background(Theme.userBubble)
-                            .clipShape(RoundedRectangle(cornerRadius: 20))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
+                    }
+                    // Sent mid-turn: sitting in the agent's queue until the
+                    // current run ends. Without this tag the bubble read as
+                    // "sent and ignored" while the agent was simply busy.
+                    if message.queued == true {
+                        HStack(spacing: 3) {
+                            Image(systemName: "clock").font(.system(size: 9))
+                            Text("Queued").font(.caption2)
+                        }
+                        .foregroundColor(Theme.mutedText)
                     }
                 }
             }
+            // Turn separation: a user message opens a turn, so it gets a
+            // little more air above it than rows within a turn.
+            .padding(.top, 6)
         } else {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 MarkdownView(text: trimmedBody)
                     .foregroundColor(Theme.text)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -146,6 +165,29 @@ struct MessageRow: View, Equatable {
         }
     }
 
+    /// Reasoning output, shown muted and italic. Hidden entirely until now, which
+    /// made a reasoning model (DeepSeek via opencode) look hung: thinking is most
+    /// of its wall-clock, so the screen sat on a bare spinner while the model was
+    /// in fact working. Capped and line-limited like tool results — reasoning runs
+    /// long and Text lays out the whole string even when clipped.
+    @ViewBuilder
+    private var thinkingRow: some View {
+        if let c = message.content, !c.allSatisfy(\.isWhitespace) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.caption2).foregroundColor(Theme.mutedText.opacity(0.7))
+                Text(c.count > 4000 ? String(c.prefix(4000)) + "…" : c)
+                    .font(.caption).italic()
+                    .foregroundColor(Theme.mutedText.opacity(0.85))
+                    .lineLimit(8)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 2)
+            .padding(.vertical, 2)
+        }
+    }
+
     private var errorRow: some View {
         Text(message.content ?? "Error")
             .foregroundColor(Theme.danger)
@@ -153,7 +195,7 @@ struct MessageRow: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
             .background(Theme.danger.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.chip))
     }
 
     // MARK: delivered media (SendUserFile)
@@ -248,8 +290,8 @@ private struct InjectedContextChip: View {
                 }
                 .frame(maxHeight: 260)
                 .background(Theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.chip))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.chip).stroke(Theme.border, lineWidth: 1))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

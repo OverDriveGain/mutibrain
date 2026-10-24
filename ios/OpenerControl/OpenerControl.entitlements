@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Intentionally NO app-group: the signed build strips app groups (headless
+         provisioning of app groups is a dead end), and the Control doesn't need
+         one — it reads the server URL + token from SharedConfig's compile-time
+         default (baked at build time), exactly like the ScreenBroadcast target. -->
+</dict>
+</plist>

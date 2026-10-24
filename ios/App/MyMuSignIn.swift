@@ -115,6 +115,7 @@ struct MyMuSignIn: View {
             try await appState.login(username: username.trimmingCharacters(in: .whitespaces),
                                      password: password)
             GadkVoice.beacon("mymu-login-ok")
+            appState.reauthNeeded = nil   // a pinned re-sign-in is satisfied too
             password = ""
         } catch {
             self.error = error.localizedDescription

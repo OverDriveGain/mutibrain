@@ -9,6 +9,10 @@ struct ChatTarget: Hashable {
     let isRemote: Bool
     let title: String
     var projectPath: String? = nil
+    /// Session provider when the ORIGIN list knew it (local sessions carry a
+    /// real one). Live agents resolve their harness from the id prefix instead,
+    /// so nil here never loses information.
+    var provider: String? = nil
 }
 
 enum Route: Hashable {
@@ -32,7 +36,19 @@ struct RouteView: View {
             ChatView(sessionId: t.sessionId, projectId: t.projectId, isRemote: t.isRemote,
                      title: t.title, token: hostRoute?.token ?? appState.token ?? "",
                      projectPath: t.projectPath, origin: hostRoute?.origin,
-                     pinnedHostNeedingLogin: t.isRemote ? appState.pinnedHostNeedingLogin(title: t.title) : nil)
+                     pinnedHostNeedingLogin: t.isRemote ? appState.pinnedHostNeedingLogin(title: t.title) : nil,
+                     provider: t.provider)
+                // Keyed by session: a notification tap can REPLACE the chat at
+                // the same stack depth, and without an explicit identity the
+                // old conversation's state (relay socket included) survived the
+                // swap — screen kept showing the previous chat.
+                // ALSO keyed by the resolved host: the routing map loads async,
+                // and a chat opened before it landed stayed silently bound to
+                // the wrong host for its whole life (the relay socket lives in
+                // @StateObject state that param changes don't rebuild). A route
+                // change now rebuilds the chat against the agent's real host —
+                // the warm-start cache makes the swap invisible.
+                .id("\(t.sessionId)|\(hostRoute?.origin ?? "")")
         case .projectDetail(let p):
             ProjectDetailView(project: p)
         }

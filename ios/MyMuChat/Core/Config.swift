@@ -43,9 +43,13 @@ enum Config {
     /// `origin` overrides the host for routed conversations (files live on the
     /// agent's assigned host, not the active account's).
     static func fileStreamURL(projectId: String, path: String, token: String, delivered: Bool, origin: String? = nil) -> URL? {
-        let route = delivered ? "delivered-file" : "files/content"
         let encodedId = projectId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? projectId
-        var comps = URLComponents(string: (origin ?? serverOrigin) + "/api/projects/\(encodedId)/\(route)")
+        // File browser previews use the stock file-tree path; delivered files
+        // (agent SendUserFile) keep the fork's delivered-file route.
+        let base = delivered
+            ? "/api/projects/\(encodedId)/delivered-file"
+            : "/api/file-tree/projects/\(encodedId)/files/content"
+        var comps = URLComponents(string: (origin ?? serverOrigin) + base)
         comps?.queryItems = [
             URLQueryItem(name: "path", value: path),
             URLQueryItem(name: "token", value: token),

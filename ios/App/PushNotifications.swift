@@ -88,6 +88,10 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
     /// Ask for permission (once granted, iOS remembers) and register for remote
     /// notifications. Safe to call repeatedly — e.g. on every foreground.
     func requestAuthorizationAndRegister() {
+        #if DEBUG
+        // Screenshot/QA runs on the simulator: no permission alert over the UI.
+        if ProcessInfo.processInfo.environment["MYAGENT_QA"] == "1" { return }
+        #endif
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
             DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }

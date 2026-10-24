@@ -1,13 +1,29 @@
 import SwiftUI
+import UIKit
 
-/// Home screen — the mymu-voice critter (SDF blend-shell character, rendered by
-/// the server's embed page in a webview) with the native gadk voice underneath.
-/// "Talk to me" runs gadk (GadkVoice, native audio); the critter turns to face
-/// you and lip-bobs while the agent speaks; a bubble shows the words.
+/// Home screen — the mymu-voice swarm/critter (rendered by the server's embed
+/// page in a webview) with the native gadk voice underneath, and since
+/// 2026-10-24 the brain's MyMu conversation as a DRAWER under it (see
+/// ChatDrawer.swift for the three states and why). "Talk to me" runs gadk
+/// (GadkVoice, native audio); the swarm reacts to both voices; the hand-off
+/// chips inside the embed keep showing what the brain is doing.
 /// The old pixel-art pet room this replaces lives on in PixelKit/PetEngine.
+@MainActor
 struct PetView: View {
     @StateObject private var voice = GadkVoice()
     @StateObject private var critter = CritterController()
+    // The brain's chat = the vendored MyMu client. Its account and roster
+    // live HERE (not in the drawer) so the closed drawer's peek row knows the
+    // agent's name and state, and a drag-open shows a conversation at once.
+    @StateObject private var mymu = AppState()
+    @StateObject private var roster = ProjectsStore()
+    @AppStorage("chatURL", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var chatURL: String = SharedConfig.defaultChat
+    @AppStorage("mymuHost", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var mymuHost: String = "https://code.kaxtus.com"
+    @AppStorage("mymuAgent", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var mymuAgent: String = "special-agent"
+
     @State private var showSettings = false
     /// Opened by the web "Screen" massam via the mymuBroadcast bridge — shows the
     /// native screen-capture sheet (standard broadcast picker + mic) right there.
@@ -16,10 +32,28 @@ struct PetView: View {
     /// garden. Voice stays live in both, so you can say "walk to Zohreh" from
     /// the garden and watch it happen.
     @State private var showSpot = false
-    /// The embed's keyboard composer is open (mymuCompose bridge): the big
-    /// native mic gets out of the way of the conversation (Manar 2026-10-23:
-    /// "when I chat with the agent there is a big microphone on the screen").
-    @State private var composing = false
+
+    // ---- the drawer ----
+    @State private var detent: DrawerDetent = .closed
+    /// Live drag delta (points, + = up) on top of the resting height.
+    @State private var dragDelta: CGFloat = 0
+    @State private var dragging = false
+    /// Height of the tab's safe area — the drawer's world (shrinks with the keyboard).
+    @State private var container: CGFloat = 0
+    @State private var hintFetched = false
+
+    private var metrics: DrawerMetrics { DrawerMetrics(container: container) }
+
+    init() {
+        #if DEBUG
+        // Screenshot/QA hook: launch with MYAGENT_DRAWER=closed|half|full
+        // (simulator: SIMCTL_CHILD_MYAGENT_DRAWER=half xcrun simctl launch …)
+        // to open on a given drawer state without a touch driver.
+        if let d = ProcessInfo.processInfo.environment["MYAGENT_DRAWER"] {
+            _detent = State(initialValue: d == "full" ? .full : (d == "half" ? .half : .closed))
+        }
+        #endif
+    }
 
     private var critterState: String {
         guard voice.active else { return "idle" }
@@ -38,12 +72,6 @@ struct PetView: View {
         voice.stageText.hasPrefix("✗") ? voice.stageText : ""
     }
 
-    private var statusColor: Color {
-        if voice.stageText.hasPrefix("✗") { return .red.opacity(0.85) }
-        if !voice.stageText.isEmpty { return .white.opacity(0.85) }
-        return .white.opacity(0.6)
-    }
-
     private var gadkOrigin: URL {
         let url = SharedConfig.load().gadkURL
         var c = URLComponents()
@@ -54,123 +82,181 @@ struct PetView: View {
     }
 
     var body: some View {
-        ZStack {
-            if showSpot {
-                SpotView(origin: gadkOrigin)
-                    .ignoresSafeArea()
+        scene
+            .toolbar(detent == .closed ? .visible : .hidden, for: .tabBar)
+            .environmentObject(mymu)
+            .environmentObject(roster)
+            .modifier(VoiceWiring(voice: voice, critter: critter, critterState: critterState))
+            .modifier(MassamWiring(showScreenpipe: $showScreenpipe))
+            .onAppear {
+                GadkVoice.beacon("app-launched")
+                let t = GadkVoice.feedTarget()
+                critter.startFeeds(origin: t.origin, app: t.app, token: t.token)
+                critter.setStage(shift: 0, scale: 1, inset: DrawerMetrics.peek, dragging: false)
+            }
+            .onDisappear { critter.stopFeeds() }
+            .animation(.easeInOut(duration: 0.2), value: voice.caption)
+            // ---- MyMu access: which host/agent (from /config), then the roster ----
+            .task(id: chatURL + "|" + mymuHost + "|" + mymuAgent) {
+                if !hintFetched {
+                    hintFetched = true
+                    await MyMuHint.fetch { h, a in mymuHost = h; mymuAgent = a }
+                }
+                await BrainAccess.load(mymu, roster, chatURL: chatURL)
+            }
+            .onChange(of: mymu.accountEpoch) { _ in
+                Task { await BrainAccess.load(mymu, roster, chatURL: chatURL) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuUnauthorized)) { note in
+                // A rejected MyMu token: the client probes once more before it
+                // ends the session (reauthNeeded) — the drawer then shows the sign-in.
+                guard let origin = note.userInfo?["origin"] as? String else { return }
+                mymu.handleUnauthorized(origin: origin)
+            }
+            // Writing needs the room: the keyboard lifts a half drawer to full.
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                if detent == .half { snap(.full, metrics) }
+            }
+            .sheet(isPresented: $showSettings) {
+                ContentView(mymuUser: mymu.user?.username,
+                            onMyMuSignOut: { mymu.logout(); roster.projects = [] })
+            }
+    }
+
+    /// The stage (swarm), the seam (mic), and the drawer, laid out in the
+    /// tab's safe area — the drawer's world.
+    private var scene: some View {
+        GeometryReader { geo in
+            let m = DrawerMetrics(container: geo.size.height)
+            let h = m.clamp(m.height(detent) + dragDelta)
+            ZStack(alignment: .bottom) {
+                if showSpot {
+                    SpotView(origin: gadkOrigin)
+                        .ignoresSafeArea()
+                } else {
+                    CritterView(controller: critter, origin: gadkOrigin)
+                        .ignoresSafeArea()
+                }
+
+                VStack(spacing: 14) {
+                    header
+                    // What she's saying — quiet words at the top, never covering
+                    // the avatar (was a big center-screen speech bubble).
+                    if voice.active && !voice.caption.isEmpty {
+                        Text(voice.caption)
+                            .font(.system(.footnote, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .truncationMode(.head)
+                            .frame(maxWidth: .infinity)
+                            .transition(.opacity)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 18)
+
+                drawer(h: h, m: m)
+                seam(h: h, m: m, width: geo.size.width)
+            }
+            .onAppear {
+                container = geo.size.height
+                stage(height: m.height(detent), m, dragging: false)
+            }
+            .onChange(of: geo.size.height) { container = $0 }
+        }
+    }
+
+    /// The conversation drawer. Closed = the peek line (the brain's name +
+    /// state), open = MyMu's chat. The tab bar leaves while it is open (a
+    /// conversation is full-screen content).
+    private func drawer(h: CGFloat, m: DrawerMetrics) -> some View {
+        ChatDrawer(height: h,
+                   handleZone: detent == .closed ? .infinity : 64,
+                   onDrag: { d in drag(d, m) },
+                   onRelease: { d, coast in release(d, coast, m) }) {
+            if detent != .closed {
+                BrainChatRoot(chatURL: chatURL, host: mymuHost, agentName: mymuAgent,
+                              showVoiceButton: detent == .full,
+                              onVoice: { backToVoice(m) })
+                    .transition(.opacity)
             } else {
-                CritterView(controller: critter, origin: gadkOrigin)
-                    .ignoresSafeArea()
-            }
-
-            VStack(spacing: 14) {
-                header
-
-                // What she's saying — quiet words at the top, never covering
-                // the avatar (was a big center-screen speech bubble).
-                if voice.active && !voice.caption.isEmpty {
-                    Text(voice.caption)
-                        .font(.system(.footnote, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                        .truncationMode(.head)
-                        .frame(maxWidth: .infinity)
-                        .transition(.opacity)
-                }
-
-                Spacer()
-
-                // Old dots equalizer (MicMeter) REMOVED 2026-07-28 (Manar): the
-                // reacting swarm IS the equalizer now — no redundant native bars.
-
-                if !statusLine.isEmpty {
-                    Text(statusLine)
-                        .font(.system(.footnote, design: .rounded).weight(.medium))
-                        .foregroundStyle(statusColor)
-                        .transition(.opacity)
-                        .animation(.easeInOut(duration: 0.15), value: voice.stageText)
-                }
-
-                if !composing {
-                    TalkButton(active: voice.active, answering: voice.answering) { voice.toggle() }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 14)
-        }
-        .onAppear {
-            GadkVoice.beacon("app-launched")
-            let t = GadkVoice.feedTarget()
-            critter.startFeeds(origin: t.origin, app: t.app, token: t.token)
-        }
-        .onDisappear { critter.stopFeeds() }
-        .onChange(of: voice.active) { on in
-            critter.setState(critterState)
-            if !on { critter.setLevel(0) }
-        }
-        .onChange(of: voice.answering) { _ in critter.setState(critterState) }
-        .onChange(of: voice.connectStage) { _ in critter.setState(critterState) }
-        .onChange(of: voice.micLevel) { lvl in
-            if voice.active && !voice.answering { critter.setLevel(lvl) }
-        }
-        .onChange(of: voice.outLevel) { lvl in
-            if voice.answering { critter.setLevel(lvl) }
-        }
-        .onChange(of: voice.brainDispatched) { _ in
-            // give the tool a beat to register in the ledger, then show the chip
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { critter.refreshPending() }
-        }
-        .onChange(of: voice.moveRequest) { mv in
-            guard let mv, !mv.isEmpty else { return }
-            critter.perform(mv, duration: voice.moveDuration)
-            voice.moveRequest = nil        // re-arm for repeated identical moves
-            voice.moveDuration = nil
-        }
-        .animation(.spring(response: 0.4, dampingFraction: 0.7), value: voice.active)
-        .animation(.easeInOut(duration: 0.2), value: voice.caption)
-        .sheet(isPresented: $showSettings) { ContentView() }
-        .sheet(isPresented: $showScreenpipe) {
-            NavigationView { ScreenpipeView() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .mymuShowScreenpipe)) { _ in
-            showScreenpipe = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .mymuComposing)) { n in
-            let open = n.userInfo?["open"] as? Bool ?? false
-            withAnimation(.easeInOut(duration: 0.2)) { composing = open }
-            GadkVoice.beacon(open ? "compose-open" : "compose-close")
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .mymuPlaySongs)) { n in
-            // The Music massam tapped a song/album/playlist: the native player
-            // takes the queue. During a live conversation the music ducks under
-            // it (like keep_listening); otherwise it just plays.
-            guard let raw = n.userInfo?["songs"] as? [[String: Any]],
-                  let data = try? JSONSerialization.data(withJSONObject: raw),
-                  let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty
-            else { return }
-            let startAt = n.userInfo?["startAt"] as? Int ?? 0
-            GadkVoice.beacon("massam-play-\(songs.count)")
-            SubsonicPlayer.shared.play(songs, startAt: startAt)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .mymuMusicControl)) { n in
-            switch n.userInfo?["action"] as? String {
-            case "pause": SubsonicPlayer.shared.pauseFromVoice()
-            case "resume": SubsonicPlayer.shared.resumeFromVoice()
-            case "next": SubsonicPlayer.shared.next()
-            case "previous": SubsonicPlayer.shared.prev()
-            default: break
+                BrainPeek(agentName: mymuAgent, chatURL: chatURL)
+                    .contentShape(Rectangle())
+                    .onTapGesture { snap(.half, m) }
             }
         }
-        .onAppear {
-            // Cold launch from the opener's "your screen isn't being recorded"
-            // notification: the tap was handled before this view listened, so
-            // PushNotifications left a flag — land on the capture sheet now.
-            if UserDefaults.standard.bool(forKey: PushNotifications.pendingBroadcastKey) {
-                UserDefaults.standard.removeObject(forKey: PushNotifications.pendingBroadcastKey)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showScreenpipe = true }
+    }
+
+    /// The mic (and any failure line) ride the SEAM: centred under the swarm
+    /// while closed; as the drawer rises it glides to the LEFT corner of the
+    /// seam (the drawer's grabber stays free in the middle) and at full height
+    /// it hands over to the waveform button in the same corner of the nav bar.
+    private func seam(h: CGFloat, m: DrawerMetrics, width: CGFloat) -> some View {
+        let resting = detent == .closed && !dragging
+        let p = min(1, max(0, (h - m.closed) / max(1, m.half - m.closed)))
+        return VStack(spacing: 8) {
+            if !statusLine.isEmpty {
+                Text(statusLine)
+                    .font(.system(.footnote, design: .rounded).weight(.medium))
+                    .foregroundStyle(.red.opacity(0.85))
+                    .transition(.opacity)
             }
+            TalkButton(active: voice.active, answering: voice.answering,
+                       onSeam: !resting) { voice.toggle() }
         }
+        // Positioned with an OFFSET, not padding: padding would grow the
+        // ZStack past the container at full height and push the whole scene
+        // (drawer included) 54pt off the bottom.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .offset(x: -p * (width / 2 - 58), y: -(resting ? m.closed + 12 : h - 42))
+        .opacity(detent == .full && !dragging ? 0 : 1)
+        .allowsHitTesting(!(detent == .full && !dragging))
+    }
+
+    // MARK: - drawer mechanics
+
+    private func drag(_ delta: CGFloat, _ m: DrawerMetrics) {
+        dragging = true
+        dragDelta = delta
+        stage(height: m.clamp(m.height(detent) + delta), m, dragging: true)
+    }
+
+    private func release(_ delta: CGFloat, _ coast: CGFloat, _ m: DrawerMetrics) {
+        let h = m.clamp(m.height(detent) + delta)
+        snap(m.nearest(to: h + coast * 0.6), m)
+    }
+
+    private func snap(_ target: DrawerDetent, _ m: DrawerMetrics) {
+        let changed = target != detent
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+            detent = target
+            dragDelta = 0
+            dragging = false
+        }
+        stage(height: m.height(target), m, dragging: false)
+        if changed {
+            Haptics.send()
+            GadkVoice.beacon("drawer-\(target)")
+        }
+    }
+
+    /// From the full conversation back to talking: the drawer drops to half
+    /// (the swarm comes back above it) and the voice session starts if it
+    /// isn't running — one tap from writing to speaking.
+    private func backToVoice(_ m: DrawerMetrics) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        snap(.half, m)
+        if !voice.active { voice.toggle() }
+    }
+
+    /// Re-compose the stage: the swarm shifts up by half the drawer's rise and
+    /// shrinks towards 78% as the drawer reaches half height, so it re-centres
+    /// in the space it has left. Overlay controls in the embed clear the peek.
+    private func stage(height h: CGFloat, _ m: DrawerMetrics, dragging: Bool) {
+        let rise = max(0, h - m.closed)
+        let p = min(1, rise / max(1, m.half - m.closed))
+        critter.setStage(shift: rise / 2, scale: 1 - 0.22 * p, inset: DrawerMetrics.peek, dragging: dragging)
     }
 
     private var header: some View {
@@ -180,14 +266,9 @@ struct PetView: View {
             Spacer()
             // Spot (garden / TEAMWORK) toggle — HIDDEN 2026-07-28 (Manar: not
             // needed now, but KEEP for teams work). SpotView + showSpot stay
-            // wired below; un-comment this button to bring it back.
+            // wired; un-comment this button to bring it back.
             // Button { withAnimation(.easeInOut(duration: 0.25)) { showSpot.toggle() } } label: {
             //     Image(systemName: showSpot ? "person.fill" : "tree.fill")
-            //         .font(.title3)
-            //         .foregroundStyle(showSpot ? Color(red: 0.62, green: 0.94, blue: 0.75)
-            //                                   : .white.opacity(0.7))
-            //         .frame(width: 44, height: 44)
-            //         .contentShape(Rectangle())
             // }
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape.fill")
@@ -201,34 +282,97 @@ struct PetView: View {
     }
 }
 
-// MARK: - Mic meter
+// MARK: - wiring
 
-/// Simple symmetric equalizer showing live mic loudness — the visible proof
-/// the app hears you while the status line stays a plain "Listening…".
-private struct MicMeter: View {
-    let level: Float
-    private static let mult: [CGFloat] = [0.30, 0.55, 0.80, 1.00, 0.80, 0.55, 0.30]
+/// Voice → avatar: state, levels, moves, hand-off chips. Split out of PetView's
+/// body so the type-checker has a chain it can finish.
+private struct VoiceWiring: ViewModifier {
+    @ObservedObject var voice: GadkVoice
+    let critter: CritterController
+    let critterState: String
 
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<Self.mult.count, id: \.self) { i in
-                Capsule()
-                    .fill(.white.opacity(0.85))
-                    .frame(width: 4, height: 4 + 24 * Self.mult[i] * CGFloat(level))
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: voice.active) { on in
+                critter.setState(critterState)
+                if !on { critter.setLevel(0) }
             }
-        }
-        .frame(height: 30)
-        .animation(.linear(duration: 0.09), value: level)
+            .onChange(of: voice.answering) { _ in critter.setState(critterState) }
+            .onChange(of: voice.connectStage) { _ in critter.setState(critterState) }
+            .onChange(of: voice.micLevel) { lvl in
+                if voice.active && !voice.answering { critter.setLevel(lvl) }
+            }
+            .onChange(of: voice.outLevel) { lvl in
+                if voice.answering { critter.setLevel(lvl) }
+            }
+            .onChange(of: voice.brainDispatched) { _ in
+                // give the tool a beat to register in the ledger, then show the chip
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { critter.refreshPending() }
+            }
+            .onChange(of: voice.moveRequest) { mv in
+                guard let mv, !mv.isEmpty else { return }
+                critter.perform(mv, duration: voice.moveDuration)
+                voice.moveRequest = nil        // re-arm for repeated identical moves
+                voice.moveDuration = nil
+            }
+    }
+}
+
+/// Web massams → native: the screen-capture sheet, the music player.
+private struct MassamWiring: ViewModifier {
+    @Binding var showScreenpipe: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $showScreenpipe) {
+                NavigationView { ScreenpipeView() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuShowScreenpipe)) { _ in
+                showScreenpipe = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuPlaySongs)) { n in
+                // The Music massam tapped a song/album/playlist: the native player
+                // takes the queue. During a live conversation the music ducks under
+                // it (like keep_listening); otherwise it just plays.
+                guard let raw = n.userInfo?["songs"] as? [[String: Any]],
+                      let data = try? JSONSerialization.data(withJSONObject: raw),
+                      let songs = try? JSONDecoder().decode([Song].self, from: data), !songs.isEmpty
+                else { return }
+                let startAt = n.userInfo?["startAt"] as? Int ?? 0
+                GadkVoice.beacon("massam-play-\(songs.count)")
+                SubsonicPlayer.shared.play(songs, startAt: startAt)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuMusicControl)) { n in
+                switch n.userInfo?["action"] as? String {
+                case "pause": SubsonicPlayer.shared.pauseFromVoice()
+                case "resume": SubsonicPlayer.shared.resumeFromVoice()
+                case "next": SubsonicPlayer.shared.next()
+                case "previous": SubsonicPlayer.shared.prev()
+                default: break
+                }
+            }
+            .onAppear {
+                // Cold launch from the opener's "your screen isn't being recorded"
+                // notification: the tap was handled before this view listened, so
+                // PushNotifications left a flag — land on the capture sheet now.
+                if UserDefaults.standard.bool(forKey: PushNotifications.pendingBroadcastKey) {
+                    UserDefaults.standard.removeObject(forKey: PushNotifications.pendingBroadcastKey)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showScreenpipe = true }
+                }
+            }
     }
 }
 
 // MARK: - Talk button
 
-/// Modern circular mic button: soft gradient + glow, expanding pulse ring while
-/// the session is live, red stop state.
+/// Circular mic button. Background-less under the swarm (Manar 2026-07-27:
+/// just the symbol, a faint expanding ring is the only "live" cue); ON THE
+/// SEAM (drawer open) it gets a dark glass disc so it reads over both the
+/// swarm and the drawer's edge.
 private struct TalkButton: View {
     let active: Bool
     let answering: Bool
+    let onSeam: Bool
     let action: () -> Void
     @State private var pulsing = false
 
@@ -237,10 +381,15 @@ private struct TalkButton: View {
     }
 
     var body: some View {
-        // Background-less (Manar 2026-07-27): just the symbol, no filled
-        // circle, no glow — a faint expanding ring is the only "live" cue.
         Button(action: action) {
             ZStack {
+                if onSeam {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 1))
+                        .frame(width: 60, height: 60)
+                        .shadow(color: .black.opacity(0.5), radius: 10, y: 3)
+                }
                 if active {
                     Circle()
                         .stroke(glow.opacity(0.35), lineWidth: 2)
@@ -249,7 +398,7 @@ private struct TalkButton: View {
                         .opacity(pulsing ? 0 : 0.7)
                 }
                 Image(systemName: active ? "stop.fill" : "mic.fill")
-                    .font(.system(size: 34, weight: .semibold))
+                    .font(.system(size: onSeam ? 26 : 34, weight: .semibold))
                     .foregroundStyle(active ? Color(red: 1.0, green: 0.45, blue: 0.45)
                                             : .white.opacity(0.85))
                     .shadow(color: .black.opacity(0.6), radius: 6)
@@ -258,9 +407,10 @@ private struct TalkButton: View {
                                ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true)
                                : .default, value: answering)
             }
-            .frame(width: 136, height: 136)   // hit target — a bit bigger (Manar 2026-07-28)
+            .frame(width: 96, height: 96)   // hit target
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("talk-button")
         .onChange(of: active) { isOn in
             pulsing = false
             guard isOn else { return }
@@ -268,31 +418,6 @@ private struct TalkButton: View {
                 pulsing = true
             }
         }
-    }
-}
-
-// MARK: - Speech bubble
-
-private struct SpeechBubble: View {
-    let text: String
-    var body: some View {
-        Text(text)
-            .font(.system(.callout, design: .rounded)).bold()
-            .foregroundStyle(PX.ink)
-            .multilineTextAlignment(.center).lineLimit(4)
-            .padding(.horizontal, 16).padding(.vertical, 12)
-            .background(
-                ZStack {
-                    Rectangle().fill(PX.ink)
-                    Rectangle().fill(PX.white).padding(3)
-                }
-            )
-            .overlay(alignment: .bottom) {
-                Rectangle().fill(PX.white).frame(width: 16, height: 12)
-                    .overlay(Rectangle().fill(PX.ink).frame(width: 16, height: 3), alignment: .bottom)
-                    .offset(y: 11)
-            }
-            .frame(maxWidth: 300)
     }
 }
 
