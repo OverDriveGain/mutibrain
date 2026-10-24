@@ -34,8 +34,18 @@ enum AudioSessionManager {
 
     /// Call mode for the voice conversation. iOS flips to the call-volume
     /// domain and ducks other audio (that IS the wanted standard behavior).
+    ///
+    /// BLUETOOTH (2026-09-13, Manar: "voice doesn't go to headphones, forced
+    /// on speaker"): .voiceChat cannot route output over A2DP — with HFP
+    /// disallowed and BT connected, iOS fell back to the SPEAKER. So the
+    /// conversation state additionally allows HFP (.allowBluetooth), exactly
+    /// what every VoIP call does: assistant voice + headset mic ride the
+    /// hands-free profile (speech-band audio is fine for SPEECH). The
+    /// 2026-07-15 music ruling is untouched — music only ever plays in
+    /// `.media`, which stays A2DP-only, so it can never hit the call codec.
     static func conversation() {
-        apply(category: .playAndRecord, mode: .voiceChat, state: .conversation)
+        apply(category: .playAndRecord, mode: .voiceChat, state: .conversation,
+              extraOptions: [.allowBluetooth])
     }
 
     /// Fully release the session — ONLY when nothing at all is using audio.
@@ -45,20 +55,24 @@ enum AudioSessionManager {
     }
 
     private static func apply(category: AVAudioSession.Category,
-                              mode: AVAudioSession.Mode, state newState: State) {
+                              mode: AVAudioSession.Mode, state newState: State,
+                              extraOptions: AVAudioSession.CategoryOptions = []) {
         let s = AVAudioSession.sharedInstance()
         do {
-            // A2DP ONLY, never .allowBluetooth (HFP): with .playAndRecord and a
-            // live input, iOS pins Bluetooth to the HANDS-FREE profile so it
-            // can use the headset mic — and then MUSIC plays over the 8/16 kHz
+            // BASE = A2DP only, never HFP: with .playAndRecord and a live
+            // input, iOS pins Bluetooth to the HANDS-FREE profile so it can
+            // use the headset mic — and then MUSIC plays over the 8/16 kHz
             // mono phone-call codec (prod beacons: out=BluetoothHFP at
             // vol=100 = Manar's "low quality / effect on it"). With A2DP-only
             // the BT output rides the full-band stereo media link and the mic
             // falls back to the iPhone's built-in mic (AEC works fine with
-            // it). Bonus: no HFP<->A2DP route renegotiation between states —
-            // that churn was the old watchdog-kill zone.
-            try s.setCategory(category, mode: mode,
-                              options: [.defaultToSpeaker, .allowBluetoothA2DP])
+            // it). The CONVERSATION state opts back into HFP via extraOptions
+            // (see conversation()) — voiceChat can't output over A2DP, and a
+            // voice call over the hands-free profile IS the platform standard.
+            var options: AVAudioSession.CategoryOptions =
+                [.defaultToSpeaker, .allowBluetoothA2DP]
+            options.formUnion(extraOptions)
+            try s.setCategory(category, mode: mode, options: options)
             try s.setActive(true)
         } catch {
             GadkVoice.beacon("session-\(newState.rawValue)-FAILED-\(error.localizedDescription)")

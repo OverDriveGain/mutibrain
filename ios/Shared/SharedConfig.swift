@@ -15,7 +15,14 @@ struct SharedConfig {
     let gadk: String        // gadk voice URL (the pet's brain)
 
     static let appGroup = "group.com.manarz.aiassistant"
-    static let extensionBundleID = "com.manarz.aiassistant.ScreenBroadcast"
+    // MUST equal the ScreenBroadcast.appex's real CFBundleIdentifier, else
+    // RPSystemBroadcastPickerView.preferredExtension matches nothing and the
+    // picker falls back to listing EVERY broadcast app (ChatGPT/Binance/…),
+    // forcing the user to choose. The app is com.manarz.myagent, so the
+    // extension is com.manarz.myagent.ScreenBroadcast (verified in the built
+    // appex Info.plist 2026-09-20). The App Group id below is separate and
+    // legitimately still uses the older "aiassistant" name.
+    static let extensionBundleID = "com.manarz.myagent.ScreenBroadcast"
 
     // ---- Compile-time defaults (source of truth for the broadcast extension) ----
     static let defaultBase = "http://192.168.0.229:8090"   // berlin LAN; use http://10.10.0.2:8090 on WireGuard
@@ -41,8 +48,12 @@ struct SharedConfig {
     var ingestAudioURL: URL { baseURL.appendingPathComponent("ingest-audio") }
     var gadkURL: URL { URL(string: gadk) ?? URL(string: Self.defaultGadk)! }
 
-    // Legacy WebSocket URLs (pre-screenpipe transport). Still referenced by the
-    // mic path (AudioStreamer), which is phase 2 — not yet wired to /ingest-audio.
+    // DEAD legacy WebSocket URLs (pre-screenpipe transport). The `/v1/audio` and
+    // `/v1/screen` WS endpoints never existed on the central server (every dial
+    // got HTTP 403). The mic now posts encoded segments to `ingestAudioURL`
+    // (/ingest-audio) and the screen posts JPEGs to `ingestURL` (/ingest) — the
+    // real screenpipe ingest API (the screenpipe massam). Kept only so any
+    // straggler reference still compiles; no live code uses them.
     var audioURL: URL { URL(string: base.replacingOccurrences(of: "http", with: "ws") + "/v1/audio")! }
     var screenURL: URL { URL(string: base.replacingOccurrences(of: "http", with: "ws") + "/v1/screen")! }
 
@@ -67,4 +78,37 @@ struct SharedConfig {
         guard let s, !s.isEmpty else { return nil }
         return s
     }
+}
+
+/// Cross-process capture counters for the Screenpipe massam's debug panel. The
+/// screen frames are POSTed from the BROADCAST EXTENSION (a separate process),
+/// so the app can only see how capture is doing through the shared App Group
+/// store. Written by IngestClient / AudioIngestClient, read by ScreenpipeView.
+/// Falls back to process-local defaults if the group isn't provisioned (then
+/// the extension's screen counters simply stay invisible to the app).
+enum CaptureStats {
+    private static var d: UserDefaults { UserDefaults(suiteName: SharedConfig.appGroup) ?? .standard }
+
+    static func recordScreen(ok: Bool, code: Int) { record("screen", ok: ok, code: code) }
+    static func recordAudio(ok: Bool, code: Int) { record("audio", ok: ok, code: code) }
+
+    private static func record(_ kind: String, ok: Bool, code: Int) {
+        let now = Date().timeIntervalSince1970
+        if ok {
+            d.set(d.integer(forKey: "sp.\(kind).sent") + 1, forKey: "sp.\(kind).sent")
+            d.set(now, forKey: "sp.\(kind).lastOKAt")
+            d.removeObject(forKey: "sp.\(kind).lastErr")
+        } else {
+            d.set(d.integer(forKey: "sp.\(kind).fail") + 1, forKey: "sp.\(kind).fail")
+            d.set("HTTP \(code)", forKey: "sp.\(kind).lastErr")
+            d.set(now, forKey: "sp.\(kind).lastErrAt")
+        }
+    }
+
+    static func sent(_ kind: String) -> Int { d.integer(forKey: "sp.\(kind).sent") }
+    static func failed(_ kind: String) -> Int { d.integer(forKey: "sp.\(kind).fail") }
+    static func lastOK(_ kind: String) -> Date? {
+        let t = d.double(forKey: "sp.\(kind).lastOKAt"); return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+    static func lastErr(_ kind: String) -> String? { d.string(forKey: "sp.\(kind).lastErr") }
 }

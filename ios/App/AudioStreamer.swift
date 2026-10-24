@@ -3,10 +3,18 @@ import AVFoundation
 import UIKit
 
 /// Captures the mic continuously (including while backgrounded / screen locked,
-/// thanks to the `audio` background mode + an active record session) and streams
-/// 16 kHz mono PCM16 to the server. Also plays back any audio the server pushes
-/// down (e.g. the assistant's spoken reply / TTS).
-final class AudioStreamer: NSObject, ObservableObject {
+/// thanks to the `audio` background mode + an active record session) and ships
+/// it to a screenpipe central server as rotated AAC/m4a segments via
+/// `POST /ingest-audio` (the screenpipe massam, audio half — see mymu-voice
+/// catalog/screenpipe@1.yaml).
+///
+/// HISTORY: this used to stream 16 kHz PCM16 over a `/v1/audio` WebSocket. That
+/// endpoint never existed on the central server (every dial got HTTP 403), so no
+/// audio was ever ingested. Screenpipe's real audio ingest is a batch POST of
+/// encoded chunks, which the central ASR-transcribes on the GPU. We now record
+/// short AAC segments with `AVAudioRecorder` (native, background-capable, real
+/// mp4 container the ASR decodes) and POST each finished segment.
+final class AudioStreamer: NSObject, ObservableObject, AVAudioRecorderDelegate {
     /// ONE app-wide recorder. It must outlive the Settings sheet that toggles
     /// it — a sheet-owned @StateObject deallocates on dismiss and takes the
     /// running capture with it ("mic goes off when I close the menu").
@@ -14,8 +22,7 @@ final class AudioStreamer: NSObject, ObservableObject {
 
     /// STRICTLY OPT-IN (Manar, 2026-07-15): the always-on recorder never
     /// starts unless the user explicitly enabled it in Settings; that choice
-    /// persists. (It briefly defaulted to on — wrong default for a
-    /// multi-user app: it streamed the mic to the memory server.)
+    /// persists.
     private static let enabledKey = "micAlwaysOn"
 
     static var alwaysOn: Bool {
@@ -44,24 +51,26 @@ final class AudioStreamer: NSObject, ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var sentKB: Double = 0
 
-    /// Visible to GadkVoice: while the screenpipe mic streams, nobody may
-    /// deactivate the shared AVAudioSession (it would kill this stream).
+    /// Visible to GadkVoice: while the screenpipe mic records, nobody may
+    /// deactivate the shared AVAudioSession (it would kill this capture).
     static private(set) var anyStreaming = false
 
-    private let engine = AVAudioEngine()
-    private var converter: AVAudioConverter?
-    private var ws: WebSocketClient?
+    private var recorder: AVAudioRecorder?
+    private var ingest: AudioIngestClient?
     private var observers: [NSObjectProtocol] = []
     private var heartbeat: Timer?
     private var hbCount = 0
 
-    /// What the server wants: 16 kHz, mono, signed 16-bit, interleaved.
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: true
-    )!
+    /// Segment length. Each finished segment is uploaded and a new one starts.
+    private let segmentSeconds: TimeInterval = 20
+
+    /// AAC / m4a, 16 kHz mono — matches the ASR target and keeps segments small.
+    private let recordSettings: [String: Any] = [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVSampleRateKey: 16000,
+        AVNumberOfChannelsKey: 1,
+        AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+    ]
 
     // MARK: - Lifecycle
 
@@ -70,20 +79,20 @@ final class AudioStreamer: NSObject, ObservableObject {
         requestMicThen { [weak self] granted in
             guard let self, granted else { return }
             GadkVoice.beacon("sp-mic-start-granted-\(granted)")
-            self.connect()
-            // Async onto the graph queue: the permission callback can arrive
-            // ON MAIN, and engine.start() can stall for seconds during a route
-            // flap — a synchronous hop would block the main thread (watchdog
-            // kill, which leaves NO crash marker). The session assert lives
-            // inside the ordered block, and never yanks an active conversation.
+            self.ingest = AudioIngestClient(cfg: SharedConfig.load())
+            self.ingest?.onState = { [weak self] up in
+                DispatchQueue.main.async { self?.connected = up }
+            }
+            // Async onto the graph queue: the permission callback can arrive ON
+            // MAIN, and session/recorder setup can stall for seconds during a
+            // route flap — a synchronous hop would block the main thread
+            // (watchdog kill, no crash marker). The session assert lives inside
+            // the ordered block and never yanks an active conversation.
             AudioGraph.q.async { [weak self] in
                 guard let self else { return }
                 if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
-                do {
-                    try self.startEngineLocked()
-                } catch {
-                    GadkVoice.beacon("sp-mic-engine-FAILED-\(error.localizedDescription)")
-                    NSLog("AudioStreamer engine error: \(error)")
+                guard self.startSegmentLocked() else {
+                    GadkVoice.beacon("sp-mic-record-FAILED")
                     return
                 }
                 Self.anyStreaming = true
@@ -97,10 +106,10 @@ final class AudioStreamer: NSObject, ObservableObject {
                     self.heartbeat = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
                         guard let self else { return }
                         self.hbCount += 1
-                        GadkVoice.beacon("sp-mic-hb-\(self.hbCount)-kb\(Int(self.sentKB))-eng\(self.engine.isRunning)")
+                        GadkVoice.beacon("sp-mic-hb-\(self.hbCount)-kb\(Int(self.sentKB))-rec\(self.recorder?.isRecording == true)")
                     }
                 }
-                GadkVoice.beacon("sp-mic-streaming-v9")
+                GadkVoice.beacon("sp-mic-streaming-v10-ingestaudio")
             }
         }
     }
@@ -113,18 +122,18 @@ final class AudioStreamer: NSObject, ObservableObject {
         observers.removeAll()
         AudioGraph.q.async { [self] in
             AudioGraph.guarded("sp-stop") {
-                engine.inputNode.removeTap(onBus: 0)
-                if engine.isRunning { engine.stop() }
+                // Discard the in-flight partial segment (do NOT upload it — the
+                // delegate's success path only fires on a natural forDuration end).
+                recorder?.delegate = nil
+                if recorder?.isRecording == true { recorder?.stop() }
+                if let url = recorder?.url { try? FileManager.default.removeItem(at: url) }
+                recorder = nil
             }
-            // Release the session ONLY if truly nobody needs it — ordered
-            // after the teardown, and never under music or a conversation.
             if !SubsonicPlayer.isActive && AudioSessionManager.state != .conversation {
                 AudioSessionManager.deactivate()
             }
         }
-        ws?.close()
-        ws = nil
-        converter = nil
+        ingest = nil
         DispatchQueue.main.async {
             self.isStreaming = false
             self.connected = false
@@ -133,8 +142,8 @@ final class AudioStreamer: NSObject, ObservableObject {
     }
 
     /// Everything iOS does to background audio, answered: interruptions
-    /// (Siri/calls/alarms) resume when allowed; engine halts (route/config
-    /// changes) rebuild; a mediaserverd crash rebuilds from the session up.
+    /// (Siri/calls/alarms) resume when allowed; a mediaserverd crash rebuilds
+    /// from the session up; a foreground return revives a stalled recorder.
     private func installResilience() {
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(
@@ -147,70 +156,47 @@ final class AudioStreamer: NSObject, ObservableObject {
                 GadkVoice.beacon("sp-mic-interrupted")
             } else {
                 GadkVoice.beacon("sp-mic-interruption-ended")
-                self.restartEngine("interruption-end")
+                self.restartCapture("interruption-end")
             }
-        })
-        observers.append(nc.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            guard let self, Self.anyStreaming else { return }
-            // Entry beacon BEFORE touching the graph: the 22:50 play-music
-            // crash left no trace because this handler had none.
-            GadkVoice.beacon("sp-mic-config-change-eng\(self.engine.isRunning)")
-            guard !self.engine.isRunning else { return }
-            self.restartEngine("config-change")
         })
         observers.append(nc.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self, Self.anyStreaming else { return }
             GadkVoice.beacon("sp-mic-mediaservices-reset")
-            self.restartEngine("media-reset")
+            self.restartCapture("media-reset")
         })
-        // Lifecycle beacons: if "went-background" arrives and then NOTHING
-        // until the next launch, iOS suspended us (entitlement/session issue);
-        // if capture dies with an audio event instead, we'll see that event.
         observers.append(nc.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            GadkVoice.beacon("sp-mic-went-background-engine-\(self.engine.isRunning)")
+            GadkVoice.beacon("sp-mic-went-background-rec-\(self.recorder?.isRecording == true)")
         })
         observers.append(nc.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            GadkVoice.beacon("sp-mic-foreground-again-engine-\(self.engine.isRunning)")
-            if Self.anyStreaming && !self.engine.isRunning {
-                self.restartEngine("foreground-revive")
+            GadkVoice.beacon("sp-mic-foreground-again-rec-\(self.recorder?.isRecording == true)")
+            if Self.anyStreaming && self.recorder?.isRecording != true {
+                self.restartCapture("foreground-revive")
             }
         })
     }
 
-    private func restartEngine(_ why: String, isRetry: Bool = false) {
+    private func restartCapture(_ why: String) {
         AudioGraph.q.async { [self] in
             guard Self.anyStreaming else { return }
-            // Re-assert the session INSIDE the ordered block (never from the
-            // notification thread) — and never yank an active conversation.
             if AudioSessionManager.state != .conversation { AudioSessionManager.media() }
             AudioGraph.guarded("sp-restart-teardown") {
-                engine.inputNode.removeTap(onBus: 0)
-                if engine.isRunning { engine.stop() }
+                recorder?.delegate = nil
+                if recorder?.isRecording == true { recorder?.stop() }
+                if let url = recorder?.url { try? FileManager.default.removeItem(at: url) }
+                recorder = nil
             }
-            converter = nil                  // formats may have changed — rebuild lazily
-            do {
-                try startEngineLocked()
-                GadkVoice.beacon("sp-mic-recovered-\(why)\(isRetry ? "-retry" : "")")
-            } catch {
-                GadkVoice.beacon("sp-mic-recover-FAILED-\(why)-\(error.localizedDescription)")
-                // Route churn (music starting, VP toggling) makes the input
-                // chain transiently un-initializable (err -10868 / '!ini').
-                // One delayed retry after things settle recovers it.
-                if !isRetry {
-                    AudioGraph.q.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                        self?.restartEngine(why, isRetry: true)
-                    }
-                }
+            if startSegmentLocked() {
+                GadkVoice.beacon("sp-mic-recovered-\(why)")
+            } else {
+                GadkVoice.beacon("sp-mic-recover-FAILED-\(why)")
             }
         }
     }
@@ -225,70 +211,50 @@ final class AudioStreamer: NSObject, ObservableObject {
         }
     }
 
-    private func connect() {
-        let cfg = SharedConfig.load()
-        let client = WebSocketClient(url: cfg.audioURL, token: cfg.token)
-        client.onState = { [weak self] up in DispatchQueue.main.async { self?.connected = up } }
-        client.onData = { data in
-            // Downlink audio is not wired (legacy WS never sends any). If the
-            // server ever starts, we want to know — not crash into a dead node.
-            GadkVoice.beacon("sp-mic-unexpected-downlink-\(data.count)B")
-        }
-        client.onText = { text in NSLog("server: \(text)") }
-        client.connect()
-        ws = client
-    }
-
-    /// MUST run on AudioGraph.q. Capture-only: the old downlink playerNode
-    /// (server TTS -> speaker over the legacy /v1/audio WS) was dead code the
-    /// server never exercised, and its connect/play calls in every restart
-    /// were pure crash surface — removed.
-    private func startEngineLocked() throws {
-        let input = engine.inputNode
-
-        // Tap in the node's NATIVE format; the converter is built lazily from
-        // the first real buffer (a snapshotted format goes silently dead on
-        // real devices after route changes — same bug the voice path had).
-        let tapped = AudioGraph.guarded("sp-tap") {
-            input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
-                self?.handle(buffer)
+    /// MUST run on AudioGraph.q. Start ONE fixed-length AAC segment; the delegate
+    /// uploads it and starts the next when `record(forDuration:)` finishes.
+    @discardableResult
+    private func startSegmentLocked() -> Bool {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("spmic-\(UUID().uuidString).m4a")
+        do {
+            let rec = try AVAudioRecorder(url: url, settings: recordSettings)
+            rec.delegate = self
+            guard rec.record(forDuration: segmentSeconds) else {
+                try? FileManager.default.removeItem(at: url)
+                return false
             }
+            recorder = rec
+            return true
+        } catch {
+            GadkVoice.beacon("sp-mic-recorder-init-FAILED-\(error.localizedDescription)")
+            NSLog("AudioStreamer recorder error: \(error)")
+            return false
         }
-        guard tapped else {
-            throw NSError(domain: "spmic", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "mic tap install failed"])
-        }
-        engine.prepare()
-        try engine.start()
     }
 
-    // MARK: - Uplink (mic -> server)
+    // MARK: - AVAudioRecorderDelegate — segment finished -> upload + rotate
 
-    private func handle(_ buffer: AVAudioPCMBuffer) {
-        if converter == nil || converter!.inputFormat != buffer.format {
-            converter = AVAudioConverter(from: buffer.format, to: targetFormat)
+    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        let url = recorder.url
+        // Read + upload the finished segment (off the delegate thread is fine;
+        // AudioIngestClient does its own backpressure).
+        if flag, let data = try? Data(contentsOf: url), !data.isEmpty {
+            ingest?.sendSegment(data, mime: "audio/mp4")
+            let kb = Double(data.count) / 1024
+            DispatchQueue.main.async { self.sentKB += kb }
         }
-        guard let converter, buffer.format.sampleRate > 0 else { return }
-        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
-        guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
-
-        var fed = false
-        var convErr: NSError?
-        converter.convert(to: out, error: &convErr) { _, status in
-            if fed { status.pointee = .noDataNow; return nil }
-            fed = true
-            status.pointee = .haveData
-            return buffer
+        try? FileManager.default.removeItem(at: url)
+        // Rotate: start the next segment if we're still meant to be capturing.
+        AudioGraph.q.async { [weak self] in
+            guard let self, Self.anyStreaming else { return }
+            self.startSegmentLocked()
         }
-        if convErr != nil { return }
-
-        guard let chData = out.int16ChannelData else { return }
-        let bytes = Int(out.frameLength) * MemoryLayout<Int16>.size
-        guard bytes > 0 else { return }
-        let data = Data(bytes: chData[0], count: bytes)
-        ws?.sendBinary(data)
-        DispatchQueue.main.async { self.sentKB += Double(bytes) / 1024 }
     }
 
+    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        GadkVoice.beacon("sp-mic-encode-error-\(error?.localizedDescription ?? "nil")")
+        try? FileManager.default.removeItem(at: recorder.url)
+        restartCapture("encode-error")
+    }
 }

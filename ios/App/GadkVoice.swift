@@ -26,6 +26,7 @@ final class GadkVoice: ObservableObject {
     @Published var answering = false    // assistant currently speaking
     @Published var caption = ""         // latest assistant words (this turn)
     @Published var moveRequest: String? // critter move ordered by the agent (perform_move tool)
+    var moveDuration: Double?           // optional hold time (s) for the pending moveRequest
     @Published var brainDispatched = 0  // bumps when ask_the_brain fires (cue: refresh /pending now)
     /// Connection/progress feedback line ("✓ Server up — connecting to Google…").
     /// Native milestones + server ?stages=1 messages feed it; empty = steady
@@ -578,6 +579,13 @@ final class GadkVoice: ObservableObject {
                 if let fc = part["functionCall"] as? [String: Any],
                    (fc["name"] as? String) == "perform_move",
                    let args = fc["args"] as? [String: Any], let mv = args["move"] as? String {
+                    // duration_s (agent-controlled hold time) may arrive as a
+                    // number or a numeric string — capture BEFORE moveRequest so
+                    // PetView's onChange sees both.
+                    if let d = args["duration_s"] as? Double { moveDuration = d }
+                    else if let n = args["duration_s"] as? NSNumber { moveDuration = n.doubleValue }
+                    else if let s = args["duration_s"] as? String { moveDuration = Double(s) }
+                    else { moveDuration = nil }
                     moveRequest = mv.lowercased().filter { $0.isLetter }  // sanitized for JS
                 }
                 // Any tool that returns {status:"playing", songs:[...]} ->

@@ -30,6 +30,8 @@ targets:
     dependencies:
       - target: ScreenBroadcast
         embed: true
+      - target: OpenerControl
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent
@@ -55,3 +57,25 @@ targets:
         INFOPLIST_FILE: ScreenBroadcast/Info.plist
         CODE_SIGN_ENTITLEMENTS: ScreenBroadcast/ScreenBroadcast.entitlements
         TARGETED_DEVICE_FAMILY: "1"
+
+  # iOS 18 Control Center button → "ProAgent — Opener". Tapping it runs
+  # WriteOpenerIntent in the background (no app switch): reads the live screen
+  # broadcast frame, writes an opener, copies it to the clipboard. Targets iOS
+  # 18 (Controls API) even though the app is 17 — it simply won't appear on
+  # older devices. Shares the App Group so it can read the server URL + token.
+  OpenerControl:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - OpenerControl
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.manarz.myagent.OpenerControl
+        INFOPLIST_FILE: OpenerControl/Info.plist
+        CODE_SIGN_ENTITLEMENTS: OpenerControl/OpenerControl.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        # Controls (ControlWidget) are iOS 18 API — pin this target to 18 even
+        # though the app is 17, so the iOS 18 symbols compile without guards.
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"

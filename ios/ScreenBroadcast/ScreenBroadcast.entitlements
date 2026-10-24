@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- App Group removed: not supported by free (personal-team) provisioning. -->
+    <!-- App Group re-added 2026-09-14 (paid team 7276Y3726M). Lets the broadcast
+         extension read the server/token/agent_id the app writes at runtime, and
+         lets the Screenpipe massam read cross-process capture counters. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.manarz.aiassistant</string>
+    </array>
 </dict>
 </plist>

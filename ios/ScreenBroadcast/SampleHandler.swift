@@ -26,33 +26,56 @@ class SampleHandler: RPBroadcastSampleHandler {
     // ReplayKit hands us mic buffers HERE, in the broadcast process: no
     // AVAudioSession politics, so YouTube/lock/app-suspension can't stop it.
     // The user enables the mic via the toggle in the broadcast start sheet.
-    private var audioWS: WebSocketClient?
+    //
+    // We convert each mic buffer to 16 kHz mono PCM16, accumulate ~20 s, then
+    // POST the segment (WAV-wrapped) to the screenpipe central via /ingest-audio
+    // (the screenpipe massam, audio half). WAV needs no encoder (lean for the
+    // ~50 MB extension) and ffmpeg/faster-whisper sniff the container regardless
+    // of the declared mime, so it decodes fine. Replaces the old /v1/audio WS,
+    // which never existed server-side (HTTP 403).
+    // Capture APP audio too (the audio the device plays: the far side of a
+    // call, media, etc.) — not just the mic. ReplayKit delivers it as
+    // `.audioApp`; we run it through the SAME converter+accumulator as the
+    // mic, so both mix into one mono segment = the whole call, both sides.
+    // Build-time constant (App Groups are stripped in this build, so a
+    // runtime toggle can't reach the extension). NOTE: this is INDISCRIMINATE
+    // — while broadcasting it records ALL device playback, not only calls.
+    private let captureAppAudio = true
+    private let audioSampleRate = 16000
+    private let audioSegmentSeconds: Double = 20
+    private var audioIngest: AudioIngestClient?
     private var audioConverter: AVAudioConverter?
     private let audioTarget = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                             sampleRate: 16000, channels: 1,
                                             interleaved: true)!
+    private var pcmAccum = Data()
+    private var segmentStart = Date()
+    private let audioLock = NSLock()
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
         let cfg = SharedConfig.load()
         ingest = IngestClient(cfg: cfg)
-        let ws = WebSocketClient(url: cfg.audioURL, token: cfg.token)
-        ws.connect()
-        audioWS = ws
+        audioIngest = AudioIngestClient(cfg: cfg)
+        segmentStart = Date()
     }
 
     override func broadcastFinished() {
         ingest = nil
-        audioWS?.close()
-        audioWS = nil
+        flushAudioSegment()          // ship whatever's buffered
+        audioIngest = nil
         audioConverter = nil
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with type: RPSampleBufferType) {
         if type == .audioMic {
-            autoreleasepool { handleMic(sampleBuffer) }
+            autoreleasepool { handleAudio(sampleBuffer) }
             return
         }
-        guard type == .video else { return }          // app-audio buffers: not wanted
+        if type == .audioApp {
+            if captureAppAudio { autoreleasepool { handleAudio(sampleBuffer) } }
+            return                                     // else: app audio ignored
+        }
+        guard type == .video else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         guard now - lastSent >= minInterval else { return }
@@ -79,10 +102,13 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    /// Mic CMSampleBuffer (device-native format, often 44.1/48 kHz) ->
-    /// 16 kHz mono PCM16 -> the same audio WebSocket the in-app streamer uses.
-    /// Lean on purpose: one pooled conversion per buffer, nothing retained.
-    private func handleMic(_ sb: CMSampleBuffer) {
+    /// Audio CMSampleBuffer — mic OR app playback (device-native format,
+    /// often 44.1/48 kHz) -> 16 kHz mono PCM16 -> accumulated and flushed as a
+    /// WAV segment to /ingest-audio. Both sources feed this same accumulator,
+    /// so a call's two sides mix into one chronological mono track. Lean on
+    /// purpose: one pooled conversion per buffer, nothing retained beyond the
+    /// growing PCM accumulator.
+    private func handleAudio(_ sb: CMSampleBuffer) {
         guard let desc = CMSampleBufferGetFormatDescription(sb),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc),
               let srcFormat = AVAudioFormat(streamDescription: asbd) else { return }
@@ -108,6 +134,44 @@ class SampleHandler: RPBroadcastSampleHandler {
             fed = true; status.pointee = .haveData; return src
         }
         guard err == nil, out.frameLength > 0, let ch = out.int16ChannelData else { return }
-        audioWS?.sendBinary(Data(bytes: ch[0], count: Int(out.frameLength) * 2))
+
+        audioLock.lock()
+        pcmAccum.append(Data(bytes: ch[0], count: Int(out.frameLength) * 2))
+        let elapsed = Date().timeIntervalSince(segmentStart)
+        let cap20 = audioSampleRate * 2 * Int(audioSegmentSeconds)   // bytes in a full segment
+        let ready = elapsed >= audioSegmentSeconds || pcmAccum.count >= cap20
+        audioLock.unlock()
+        if ready { flushAudioSegment() }
+    }
+
+    /// Wrap the accumulated PCM16 as a WAV and POST it as one /ingest-audio
+    /// segment, then reset the accumulator. No-op when empty.
+    private func flushAudioSegment() {
+        audioLock.lock()
+        let pcm = pcmAccum
+        let start = segmentStart
+        pcmAccum = Data()
+        segmentStart = Date()
+        audioLock.unlock()
+        guard !pcm.isEmpty else { return }
+        let wav = Self.wav(fromPCM16: pcm, sampleRate: audioSampleRate, channels: 1)
+        audioIngest?.sendSegment(wav, mime: "audio/wav", timestamp: start)
+    }
+
+    /// Minimal 44-byte RIFF/WAVE header + PCM16 payload (no encoder needed).
+    private static func wav(fromPCM16 pcm: Data, sampleRate: Int, channels: Int) -> Data {
+        let byteRate = sampleRate * channels * 2
+        let blockAlign = channels * 2
+        let dataLen = pcm.count
+        var h = Data()
+        func le32(_ v: Int) { var x = UInt32(truncatingIfNeeded: v).littleEndian; withUnsafeBytes(of: &x) { h.append(contentsOf: $0) } }
+        func le16(_ v: Int) { var x = UInt16(truncatingIfNeeded: v).littleEndian; withUnsafeBytes(of: &x) { h.append(contentsOf: $0) } }
+        h.append(contentsOf: Array("RIFF".utf8)); le32(36 + dataLen)
+        h.append(contentsOf: Array("WAVE".utf8))
+        h.append(contentsOf: Array("fmt ".utf8)); le32(16); le16(1); le16(channels)
+        le32(sampleRate); le32(byteRate); le16(blockAlign); le16(16)
+        h.append(contentsOf: Array("data".utf8)); le32(dataLen)
+        h.append(pcm)
+        return h
     }
 }

@@ -78,7 +78,9 @@ final class IngestClient {
 
         session.dataTask(with: req) { [weak self] _, resp, err in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            self?.finish(err == nil && code == 200)
+            let ok = err == nil && code == 200
+            CaptureStats.recordScreen(ok: ok, code: code)   // debug panel (app group)
+            self?.finish(ok)
         }.resume()
     }
 

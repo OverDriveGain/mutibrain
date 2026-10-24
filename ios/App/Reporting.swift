@@ -3,11 +3,12 @@ import UIKit
 
 /// Single source for the build tag carried by beacons and reports.
 enum AppBuild {
-    static let tag = "v12-reports"
+    static let tag = "v17-mic"
     /// Friendly name shown in the Buddy header (2026-07-28, Manar: "call it
     /// version 1"). `tag` still rides on every beacon so the dev side can pin
-    /// down the exact build regardless of this display name.
-    static let name = "version 1"
+    /// down the exact build regardless of this display name. Bumped to
+    /// "version 2" so Manar can read the header to confirm which build is live.
+    static let name = "version 7"
     /// Human version from the bundle, e.g. "V1.0 (5)" — kept for reference /
     /// support (bundle build number at a glance).
     static let version: String = {
@@ -15,6 +16,19 @@ enum AppBuild {
         let v = info?["CFBundleShortVersionString"] as? String ?? "?"
         let b = info?["CFBundleVersion"] as? String ?? "?"
         return "V\(v) (\(b))"
+    }()
+    /// When this binary was archived, stamped into Info.plist at build time by
+    /// ~/myagent-upload.sh on the mac (key MyMuBuildDate, "MM-dd HH:mm" local).
+    /// Empty when the key is absent (e.g. a plain Xcode run) so the header just
+    /// degrades to the name — never shows a stale or fake time.
+    static let builtAt: String = {
+        (Bundle.main.infoDictionary?["MyMuBuildDate"] as? String) ?? ""
+    }()
+    /// What the Buddy header shows: "version 7 · 07-30 23:15". Manar reads this
+    /// to tell at a glance WHICH build is on the phone — the build number alone
+    /// didn't say when it was cut.
+    static let header: String = {
+        builtAt.isEmpty ? name : "\(name) · \(builtAt)"
     }()
 }
 
