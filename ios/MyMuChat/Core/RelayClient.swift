@@ -627,6 +627,17 @@ final class RelayClient: ObservableObject {
         return missing.isEmpty ? fetched : fetched + missing
     }
 
+    /// A final `text` frame belongs to the bubble we streamed when one is a
+    /// prefix of the other (the stream may have been cut short, or the final
+    /// may carry a trimmed body). A replayed EARLIER block's final must not
+    /// hijack the bubble of the block currently streaming.
+    private static func sameBlock(bubble: String, final: String) -> Bool {
+        let b = bubble.trimmingCharacters(in: .whitespacesAndNewlines)
+        let f = final.trimmingCharacters(in: .whitespacesAndNewlines)
+        if b.isEmpty || f.isEmpty { return false }
+        return f.hasPrefix(b) || b.hasPrefix(f)
+    }
+
     /// The text the user actually TYPED: the optimistic bubble appends non-image
     /// attachments as "📎 name" lines that exist nowhere server-side.
     static func typedText(_ m: ChatMessage) -> String {
@@ -780,7 +791,9 @@ final class RelayClient: ObservableObject {
             appendStream(fresh)
             isLoading = true
         case "stream_end":
-            streamingId = nil
+            // The block's final `text` frame follows and finalizes the bubble
+            // in place — keep the bubble addressable until then.
+            break
         case "text":
             let role = obj["role"] as? String ?? "assistant"
             if role == "assistant" { noteResponseActivity() }
@@ -814,7 +827,8 @@ final class RelayClient: ObservableObject {
                     revision += 1
                     persistSoon()
                 } else if role != "user", let sid = streamingId,
-                          let idx = messages.firstIndex(where: { $0.id == sid }) {
+                          let idx = messages.firstIndex(where: { $0.id == sid }),
+                          Self.sameBlock(bubble: messages[idx].content ?? "", final: body) {
                     // The final text for the bubble that just streamed: FINALIZE
                     // it in place (same row, server id, authoritative body) —
                     // a separate final row beside the stream bubble was the
@@ -909,44 +923,71 @@ final class RelayClient: ObservableObject {
     // MARK: replay absorption
 
     /// The server re-flushes the current turn's frame buffer on every
-    /// (re)subscribe — the 45s keepalive, the foreground kick, the attach a
-    /// send performs. Id'd frames collapse by id; stream deltas carry NO id, so
-    /// they are matched as a running PREFIX of the newest assistant text row.
-    /// Only text past what's already on screen is new.
-    private var absorbTargetId: String?
+    /// (re)subscribe — the 45s keepalive and the foreground kick (a send's
+    /// own attach replays nothing: the buffer is emptied at turn end). Id'd
+    /// frames collapse by id; stream deltas carry NO id, so they are matched,
+    /// in order, as a running PREFIX of the turn's assistant text rows. Only
+    /// text past what's already on screen is new.
+    ///
+    /// Divergence is NOT assumed to be a replay: a live reply that merely
+    /// starts with the same words as the row it is compared to is swallowed
+    /// only until it differs, and the swallowed prefix is restored then. A
+    /// reply identical to an entire earlier row is repaired by its final
+    /// `text` frame (appended by id). The worst case is a missed streaming
+    /// animation, never lost or duplicated text.
+    private var absorbQueue: [String] = []
     private var absorbCursor = 0
+    private var absorbed = ""
 
     private func armReplayAbsorption() {
         flushStreamChunk()
         absorbCursor = 0
-        absorbTargetId = messages.last(where: { $0.kind == "text" && $0.role != "user" })?.id
+        absorbed = ""
+        // The current turn's assistant text rows: everything after the last
+        // user message, in order.
+        let turnStart = messages.lastIndex(where: { $0.role == "user" && $0.kind == "text" })
+            .map { $0 + 1 } ?? 0
+        absorbQueue = messages[turnStart...]
+            .filter { $0.kind == "text" && $0.role != "user" }
+            .map(\.id)
     }
 
     /// nil = fully replayed (drop); otherwise the part of `chunk` that is new.
     private func absorb(_ chunk: String) -> String? {
         guard !chunk.isEmpty else { return nil }
-        guard let tid = absorbTargetId, let idx = messages.firstIndex(where: { $0.id == tid }) else { return chunk }
-        let content = messages[idx].content ?? ""
-        let remaining = content.dropFirst(absorbCursor)
-        if remaining.isEmpty {
-            // Caught up with the known row: everything from here is live.
-            absorbTargetId = nil
-            // A row we were streaming ourselves continues in place; a
-            // finalized server row is complete, so new text is a new row.
-            if tid.hasPrefix("stream-") { streamingId = tid }
-            return chunk
+        while let tid = absorbQueue.first {
+            guard let idx = messages.firstIndex(where: { $0.id == tid }) else {
+                absorbQueue.removeFirst(); absorbCursor = 0; absorbed = ""
+                continue
+            }
+            let content = messages[idx].content ?? ""
+            let remaining = content.dropFirst(absorbCursor)
+            if remaining.isEmpty {
+                // This row fully re-covered — on to the next one. A row we were
+                // streaming ourselves (necessarily the last) continues in place.
+                absorbQueue.removeFirst(); absorbCursor = 0; absorbed = ""
+                if absorbQueue.isEmpty, tid.hasPrefix("stream-") { streamingId = tid }
+                continue
+            }
+            if remaining.hasPrefix(chunk) {
+                absorbCursor += chunk.count
+                absorbed += chunk
+                return nil
+            }
+            if chunk.hasPrefix(remaining) {
+                // Runs past this row: the excess continues our own stream
+                // bubble, or starts a new row after a finalized one.
+                let excess = String(chunk.dropFirst(remaining.count))
+                absorbQueue.removeFirst(); absorbCursor = 0; absorbed = ""
+                if absorbQueue.isEmpty, tid.hasPrefix("stream-") { streamingId = tid }
+                return absorb(excess) ?? nil
+            }
+            // Divergent: not a replay of this row — it's live text. Give back
+            // whatever was provisionally swallowed against this row.
+            let restored = absorbed + chunk
+            absorbQueue = []; absorbCursor = 0; absorbed = ""
+            return restored
         }
-        if remaining.hasPrefix(chunk) {
-            absorbCursor += chunk.count
-            return nil
-        }
-        if chunk.hasPrefix(remaining) {
-            absorbTargetId = nil
-            if tid.hasPrefix("stream-") { streamingId = tid }
-            return String(chunk.dropFirst(remaining.count))
-        }
-        // Divergent: not a replay of this row. Stream it as its own text.
-        absorbTargetId = nil
         return chunk
     }
 

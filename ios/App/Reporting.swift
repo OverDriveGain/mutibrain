@@ -8,7 +8,13 @@ enum AppBuild {
     /// version 1"). `tag` still rides on every beacon so the dev side can pin
     /// down the exact build regardless of this display name. Bumped to
     /// "version 2" so Manar can read the header to confirm which build is live.
-    static let name = "version 7"
+    // 2026-10-24: read from the bundle instead of a hand-bumped string (it
+    // said "version 7" from build 7 to build 20) — "build 21" tells Manar at
+    // a glance that the drawer build is the one on the phone.
+    static let name: String = {
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "build \(b)"
+    }()
     /// Human version from the bundle, e.g. "V1.0 (5)" — kept for reference /
     /// support (bundle build number at a glance).
     static let version: String = {

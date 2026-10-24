@@ -5,7 +5,7 @@ copied verbatim — it IS the chat of the MyAgent app (Manar 2026-10-24: "use th
 chat from MyMu exactly as it is; it is hard to reimplement"). Do not restyle or
 fork it here; fix things in MyMu and re-vendor with `scripts/vendor-mymu.sh`.
 
-Last vendored: 2026-10-24 08:59 from MyMu HEAD b5bb810 (+ 13 uncommitted files in its tree).
+Last vendored: 2026-10-24 10:13 from MyMu HEAD ab6b906 (+ 0 uncommitted files in its tree).
 
 The script re-applies the HOST PATCHES (grep "HOST PATCH"):
   * Core/AppGroup.swift — id = SharedConfig.appGroup, keychainSharing = false

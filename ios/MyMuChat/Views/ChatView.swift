@@ -80,6 +80,10 @@ struct ChatView: View {
     /// the reply really overflows.
     @State private var activeTurnSpacer: CGFloat = 1
     @State private var revisionScrollPending = false
+    /// Last distance-to-bottom the scroll-geometry tracker reported (debug HUD).
+    @State private var debugTrackerDistance: CGFloat = 0
+    /// The content block's bottom in GLOBAL space (debug HUD cross-check).
+    @State private var debugGlobalBottom: CGFloat = 0
     /// Debounced visibility for the ↓ jump button (see onChange(of: atBottom)).
     @State private var showJumpButton = false
     @State private var jumpButtonTask: Task<Void, Never>?
@@ -392,8 +396,12 @@ struct ChatView: View {
                     // Bottom anchor for scrollTo AND the active-turn spacer: the
                     // blank space that pads the sent bubble's turn out to the
                     // viewport height. Its top edge marks where the rows end.
+                    // The column's bottom padding lives INSIDE it, so "scroll to
+                    // bottom" (which aligns this view's bottom edge) reaches the
+                    // true end of the content — with the padding outside, every
+                    // pin stopped one padding short.
                     Color.clear
-                        .frame(height: max(1, anchorTurn ? activeTurnSpacer : 1))
+                        .frame(height: Self.columnPadding + max(1, anchorTurn ? activeTurnSpacer : 1))
                         .background(GeometryReader { g in
                             Color.clear.preference(key: ActiveTurnGeometryKey.self,
                                                    value: [ActiveTurnGeometryKey.spacerTop: g.frame(in: .named("chatScroll")).minY])
@@ -401,7 +409,7 @@ struct ChatView: View {
                         .id("bottom")
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, Self.columnPadding)
+                .padding(.top, Self.columnPadding)
                 // Reading column (iPad): cap the transcript at a comfortable line
                 // length instead of letting bubbles stretch edge-to-edge on wide
                 // screens. A no-op on iPhone, where the viewport is already
@@ -420,7 +428,8 @@ struct ChatView: View {
                 // background can't be recycled away in the over-scrolled state.
                 .background(GeometryReader { g in
                     Color.clear.preference(key: ContentFrameKey.self,
-                                           value: g.frame(in: .named("chatScroll")))
+                                           value: ContentFrame(named: g.frame(in: .named("chatScroll")),
+                                                               global: g.frame(in: .global)))
                 })
             }
             // Native bottom anchoring for LONG transcripts: the scroll rests at the
@@ -435,7 +444,8 @@ struct ChatView: View {
             // return to the bottom. ScrollGeometry fires on every offset change;
             // the preference stays as the layout-time signal (and the only one
             // on iOS 17).
-            .modifier(BottomEdgeTracker(threshold: ChatScroll.jumpButtonThreshold) { nearBottom in
+            .modifier(BottomEdgeTracker(threshold: ChatScroll.jumpButtonThreshold) { nearBottom, distance in
+                debugTrackerDistance = distance
                 if nearBottom != atBottom {
                     atBottom = nearBottom
                     if nearBottom { followMode = true }
@@ -477,7 +487,9 @@ struct ChatView: View {
                     }
                 }
             }
-            .onPreferenceChange(ContentFrameKey.self) { frame in
+            .onPreferenceChange(ContentFrameKey.self) { cf in
+                let frame = cf.named
+                debugGlobalBottom = cf.global.maxY
                 contentHeight = frame.height
                 contentBottom = frame.maxY
                 // Geometry-derived bottom-ness (replaces the lazy sentinel's
@@ -651,9 +663,32 @@ struct ChatView: View {
                 }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: ChatScroll.jumpButtonFade), value: showJumpButton)
+            // Field-debugging HUD for scroll edge cases (Manar's step 4 reports):
+            // MYMU_SCROLL_DEBUG=1 paints the live geometry the scroll rules
+            // read, so a flaky moment can be read off a screenshot. DEBUG only.
+            .overlay(alignment: .topLeading) {
+                #if DEBUG
+                if Self.scrollDebug {
+                    Text(String(format: "vp %.0f ch %.0f cb %.0f gb %.0f trk %.0f\natBottom %@ follow %@ anchor %@ spacer %.0f jump %@",
+                                viewportHeight, contentHeight, contentBottom, debugGlobalBottom, debugTrackerDistance,
+                                atBottom ? "Y" : "n", followMode ? "Y" : "n", anchorTurn ? "Y" : "n",
+                                activeTurnSpacer, showJumpButton ? "Y" : "n"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.yellow)
+                        .padding(4)
+                        .background(Color.black.opacity(0.6))
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("scroll-debug")
+                }
+                #endif
+            }
         }
         }
     }
+
+    #if DEBUG
+    private static let scrollDebug = ProcessInfo.processInfo.environment["MYMU_SCROLL_DEBUG"] == "1"
+    #endif
 
     /// One transcript row, with the transition that makes it ARRIVE the way
     /// the choreography wants: the sent bubble flies up from the composer, the
@@ -1180,14 +1215,15 @@ struct ChatView: View {
 /// below iOS 18, where the ContentFrameKey preference remains the only tracker.
 private struct BottomEdgeTracker: ViewModifier {
     let threshold: CGFloat
-    let onChange: (Bool) -> Void
+    /// (nearBottom, distance of the visible rect's bottom from the content's end)
+    let onChange: (Bool, CGFloat) -> Void
 
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentSize.height - g.visibleRect.maxY <= threshold
-            } action: { _, nearBottom in
-                onChange(nearBottom)
+            content.onScrollGeometryChange(for: CGFloat.self) { g in
+                g.contentSize.height - g.visibleRect.maxY
+            } action: { _, distance in
+                onChange(distance <= threshold, distance)
             }
         } else {
             content
@@ -1198,9 +1234,23 @@ private struct BottomEdgeTracker: ViewModifier {
 /// Frame of the whole transcript block in the scroll view's own coordinate
 /// space — height drives short-transcript alignment, maxY (the content's bottom
 /// edge, directly comparable to the viewport height) drives the gap guard.
+private struct ContentFrame: Equatable {
+    var named: CGRect = .zero
+    var global: CGRect = .zero
+}
+
 private struct ContentFrameKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+    static var defaultValue = ContentFrame()
+    /// Keep the one real measurement: with sibling subtrees now emitting
+    /// preferences of their own (the row geometry), SwiftUI feeds this
+    /// reducer their DEFAULT for this key too — a "last value wins" reducer
+    /// ended up delivering a zero frame, which silently blinded every rule
+    /// reading contentBottom/contentHeight (found with the scroll HUD,
+    /// 2026-10-24).
+    static func reduce(value: inout ContentFrame, nextValue: () -> ContentFrame) {
+        let next = nextValue()
+        if next != ContentFrame() { value = next }
+    }
 }
 
 /// The two edges the active-turn spacer is computed from, in scroll space:

@@ -106,6 +106,10 @@ final class AppState: ObservableObject {
             UserDefaults.standard.removeObject(forKey: key)
         }
         UserDefaults.standard.removeObject(forKey: "mymu.user")
+        // The remembered server origin too — a LiveServer run against a LAN
+        // host otherwise pre-fills the login's Server field on the next smoke
+        // run, which then signs into the wrong machine and times out.
+        UserDefaults.standard.removeObject(forKey: "mymu.serverOrigin")
     }
     #endif
 
