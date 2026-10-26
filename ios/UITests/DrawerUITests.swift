@@ -74,6 +74,38 @@ final class DrawerUITests: XCTestCase {
         }
     }
 
+    /// The home's massam controls + the Screen panel's new home in Settings.
+    func testHomeScreenButton() {
+        let app = XCUIApplication()
+        app.launchEnvironment["MYAGENT_QA"] = "1"
+        app.launch()
+        allowSystemAlert()
+        sleep(9)
+        save("11-home")
+        // the ▦ dock toggle (right edge, above the peek)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.915, dy: 0.632)).tap()
+        sleep(2)
+        save("12-dock-open")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.915, dy: 0.632)).tap()
+        sleep(1)
+        // the Screen button: straight to iOS's broadcast sheet
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.79, dy: 0.632)).tap()
+        sleep(3)
+        save("15-broadcast-sheet")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
+        sleep(2)
+        app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'gear' OR label CONTAINS[c] 'settings'")).firstMatch.tap()
+        sleep(2)
+        let sp = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Screenpipe'")).firstMatch
+        if !sp.exists { app.swipeUp() }
+        sp.tap()
+        sleep(2)
+        save("13-screenpipe")
+        app.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Live capture'")).firstMatch.tap()
+        sleep(8)
+        save("14-screen-memory")
+    }
+
     private func save(_ name: String) {
         // a stray system prompt (e.g. the microphone one if a gesture ever
         // lands on the mic) must not hide the state being photographed

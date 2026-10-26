@@ -59,12 +59,28 @@ struct DrawerMetrics {
 
 private let drawerCorner: CGFloat = 24
 
+/// The host's (unmoving) coordinate space the drawer's drag is measured in.
+let drawerWorld = "drawer-world"
+
 /// The drawer chrome + its drag. The HOST owns the height (it is what moves
 /// the mic and the swarm in step); the drawer reports drags from its handle
 /// zone and leaves everything below that zone — the transcript's scroll, the
 /// composer — to the content.
+///
+/// PERFORMANCE (2026-10-26, Manar: "so laggy when I drag"): the drawer is laid
+/// out at its RESTING height and a live drag only TRANSLATES it (`lift`). The
+/// MyMu conversation inside is never re-laid-out per frame — it re-flows once,
+/// on the snap. The shadow lives on the background shape alone (a shadow on the
+/// whole hierarchy forced an offscreen pass of the entire chat every frame),
+/// and the gesture measures in the HOST's fixed space `drawerWorld` (local
+/// space moved with the drawer and fed the motion back into the translation).
 struct ChatDrawer<Content: View>: View {
+    /// Laid-out height: the resting height of the current detent.
     let height: CGFloat
+    /// The drawer's resting top edge in `drawerWorld`.
+    let top: CGFloat
+    /// Live visual rise above the resting height (points, + = up; may be < 0).
+    let lift: CGFloat
     /// Drags must START within this many points of the drawer's top to count
     /// (the grabber row + the nav bar). `.infinity` while closed: the whole
     /// peek row is the handle.
@@ -75,6 +91,17 @@ struct ChatDrawer<Content: View>: View {
     /// (positive = up), for the detent choice.
     let onRelease: (CGFloat, CGFloat) -> Void
     @ViewBuilder let content: () -> Content
+
+    @State private var tracking: Bool?
+    @State private var lastDelta: CGFloat = 0
+    /// Resets on end AND on cancel; a cancelled drag (the chat's scroll view
+    /// or the system took the touch) never calls onEnded and would leave the
+    /// drawer stranded mid-air, so the reset settles it.
+    @GestureState private var touching = false
+
+    private var shape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(topLeadingRadius: drawerCorner, topTrailingRadius: drawerCorner)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,28 +118,42 @@ struct ChatDrawer<Content: View>: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: height, alignment: .top)
-        .background(Theme.background)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: drawerCorner, topTrailingRadius: drawerCorner))
-        .overlay(alignment: .top) {
-            // a hairline so the black sheet reads as a surface over the near-black stage
-            UnevenRoundedRectangle(topLeadingRadius: drawerCorner, topTrailingRadius: drawerCorner)
-                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                .frame(height: height)
+        .clipShape(shape)
+        .contentShape(shape)   // the surface below is decoration; THIS takes the touches
+        // The surface: taller than the drawer so a lift above the resting
+        // height never shows a gap under it (the excess sits below the screen).
+        .background(alignment: .top) {
+            shape.fill(Theme.background)
+                .overlay(shape.stroke(Color.white.opacity(0.10), lineWidth: 1))
+                .frame(height: height + 1200)
+                .shadow(color: .black.opacity(0.5), radius: 20, y: -8)
                 .allowsHitTesting(false)
         }
-        .shadow(color: .black.opacity(0.5), radius: 20, y: -8)
-        .coordinateSpace(name: "chat-drawer")
+        .offset(y: -lift)
         .simultaneousGesture(
-            DragGesture(minimumDistance: 8, coordinateSpace: .named("chat-drawer"))
+            DragGesture(minimumDistance: 8, coordinateSpace: .named(drawerWorld))
+                .updating($touching) { _, st, _ in st = true }
                 .onChanged { v in
-                    guard v.startLocation.y <= handleZone else { return }
-                    onDrag(-v.translation.height)
+                    if tracking == nil {
+                        tracking = v.startLocation.y - top <= handleZone
+                    }
+                    guard tracking == true else { return }
+                    lastDelta = -v.translation.height
+                    onDrag(lastDelta)
                 }
                 .onEnded { v in
-                    guard v.startLocation.y <= handleZone else { return }
+                    let mine = tracking == true
+                    tracking = nil
+                    guard mine else { return }
                     onRelease(-v.translation.height,
                               -(v.predictedEndTranslation.height - v.translation.height))
                 }
         )
+        .onChange(of: touching) { on in
+            guard !on, tracking != nil else { return }
+            let mine = tracking == true
+            tracking = nil
+            if mine { onRelease(lastDelta, 0) }
+        }
     }
 }

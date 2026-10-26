@@ -78,25 +78,33 @@ final class CritterController: ObservableObject {
     // bar). Throttled to ~30Hz with a trailing flush so the last value of a
     // drag always lands; re-applied after a page (re)load.
     private var stageJS = ""
-    private var stageFlush: DispatchWorkItem?
-    private var lastStageAt: CFAbsoluteTime = 0
+    /// The last stage sent, re-asserted after a (re)load; `stageJS` is the queue.
+    private var lastStageJS = ""
+    private var stageInFlight = false
     func setStage(shift: CGFloat, scale: CGFloat, inset: CGFloat, dragging: Bool) {
         stageJS = String(format: "window.critter && window.critter.setStage && window.critter.setStage({shift:%.1f,scale:%.3f,inset:%.0f,dragging:%@})",
                          Double(shift), Double(scale), Double(inset), dragging ? "true" : "false")
-        stageFlush?.cancel()
-        let gap = CFAbsoluteTimeGetCurrent() - lastStageAt
-        if gap >= 1.0 / 30.0 || !dragging {
-            flushStage()
-        } else {
-            let w = DispatchWorkItem { [weak self] in self?.flushStage() }
-            stageFlush = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + (1.0 / 30.0 - gap), execute: w)
-        }
+        // Coalesced, not throttled: while one call is in the webview's queue
+        // only the LATEST stage waits behind it, so the swarm tracks the finger
+        // at whatever rate the web process keeps up with (was a fixed 30Hz).
+        if !stageInFlight { flushStage() }
+    }
+    fileprivate func reassertStage() {
+        if stageJS.isEmpty { stageJS = lastStageJS }
+        stageInFlight = false
+        flushStage()
     }
     fileprivate func flushStage() {
-        guard !stageJS.isEmpty else { return }
-        lastStageAt = CFAbsoluteTimeGetCurrent()
-        webView?.evaluateJavaScript(stageJS, completionHandler: nil)
+        guard !stageJS.isEmpty, let webView else { return }
+        let js = stageJS
+        lastStageJS = js
+        stageJS = ""
+        stageInFlight = true
+        webView.evaluateJavaScript(js) { [weak self] _, _ in
+            guard let self else { return }
+            self.stageInFlight = false
+            if !self.stageJS.isEmpty { self.flushStage() }
+        }
     }
 
     // MARK: server feeds — pending brain tasks + capability cards
@@ -225,7 +233,13 @@ struct CritterView: UIViewRepresentable {
         func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
             case "mymuBroadcast":
-                NotificationCenter.default.post(name: .mymuShowScreenpipe, object: nil)
+                // the home's Screen button: straight to iOS's broadcast sheet
+                // (`present`); anything else opens the full Screenpipe page
+                if (message.body as? [String: Any])?["action"] as? String == "present" {
+                    BroadcastLauncher.present()
+                } else {
+                    NotificationCenter.default.post(name: .mymuShowScreenpipe, object: nil)
+                }
             case "mymuCompose":
                 let open = (message.body as? [String: Any])?["open"] as? Bool ?? false
                 NotificationCenter.default.post(name: .mymuComposing, object: nil,
@@ -265,8 +279,8 @@ struct CritterView: UIViewRepresentable {
             controller.refreshPending()
             // The stage (drawer composition) is page state — re-assert it once
             // the module has set window.critter (async after load).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [controller] in controller.flushStage() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [controller] in controller.flushStage() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [controller] in controller.reassertStage() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [controller] in controller.reassertStage() }
             // Report which embed the webview actually runs (cache diagnosis).
             // Delayed: the page's module script sets window.critter async.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak webView] in

@@ -115,6 +115,7 @@ final class GadkVoice: ObservableObject {
     func toggle() { active ? stop() : start() }
 
     func start() {
+        endRequested = false
         guard !active else { return }
         active = true; caption = ""; answering = false; newAgentTurn = true
         stageText = "Connecting to server…"
@@ -500,6 +501,10 @@ final class GadkVoice: ObservableObject {
         sendQueue.async { [weak self] in self?.accumulate(data) }
     }
 
+    /// The assistant called end_conversation: the socket close that follows
+    /// is the goodbye, not a failure.
+    private var endRequested = false
+
     private var micLogFrames = 0
     private var micLogPeak: Int16 = 0
 
@@ -526,10 +531,16 @@ final class GadkVoice: ObservableObject {
             case .failure(let err):
                 Self.beacon("ws-FAIL-\(err.localizedDescription)")
                 NSLog("GadkVoice ws receive failed: %@", err.localizedDescription)
+                // The server ends a goodbye by CLOSING the socket (normal
+                // closure) — that's the conversation finishing as asked, not
+                // a lost connection: end quietly, no error line.
+                let normal = self.ws?.closeCode == .normalClosure || self.ws?.closeCode == .goingAway
                 DispatchQueue.main.async {
                     if self.active {
+                        let asked = self.endRequested || normal
                         self.stop()
-                        self.stageText = "✗ Connection lost — tap to reconnect"
+                        if asked { Self.beacon("ended-by-agent") }
+                        else { self.stageText = "✗ Connection lost — tap to reconnect" }
                     }
                 }
             case .success(let msg):
@@ -573,6 +584,7 @@ final class GadkVoice: ObservableObject {
                 if let fc = part["functionCall"] as? [String: Any],
                    let toolName = fc["name"] as? String {
                     stageText = "⚙️ \(toolName.replacingOccurrences(of: "_", with: " "))…"
+                    if toolName == "end_conversation" { endRequested = true }
                 }
                 // The agent's perform_move tool call is OUR cue: the client is
                 // the effector — forward the move to the critter webview.

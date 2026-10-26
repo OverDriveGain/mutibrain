@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct ContentView: View {
     /// MyMu account shown in the Chat section (nil = not signed in) and the
@@ -117,6 +118,15 @@ struct ScreenpipeView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            // ---- the web Screen panel (moved off the home 2026-10-26) ------
+            Section("Screen memory") {
+                NavigationLink {
+                    ScreenPanelPage()
+                } label: {
+                    Label("Suggest · Search · Live capture", systemImage: "sparkles.rectangle.stack")
+                }
+            }
+
             // ---- MICROPHONE ------------------------------------------------
             Section("Microphone") {
                 Toggle("Record microphone", isOn: Binding(
@@ -142,4 +152,33 @@ struct ScreenpipeView: View {
             Text(detail).foregroundStyle(.secondary).monospacedDigit()
         }
     }
+}
+
+
+/// The embed's Screen massam (suggestions, auto-suggest, live capture, screen
+/// search) as a Settings page: the same web panel, loaded alone (`#only=screen`).
+/// The home keeps just the one-tap broadcast button.
+struct ScreenPanelPage: View {
+    var body: some View {
+        ScreenPanelWeb()
+            .ignoresSafeArea(edges: .bottom)
+            .navigationTitle("Screen memory")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct ScreenPanelWeb: UIViewRepresentable {
+    func makeUIView(context: Context) -> WKWebView {
+        let web = WKWebView(frame: .zero)
+        web.isOpaque = false
+        web.backgroundColor = UIColor(red: 0.02, green: 0.024, blue: 0.031, alpha: 1)
+        let t = GadkVoice.feedTarget()
+        var comps = URLComponents(url: t.origin, resolvingAgainstBaseURL: false)!
+        comps.path = "/static/critter/embed.html"
+        comps.query = nil
+        comps.fragment = "app=\(t.app)&token=\(t.token)&nochat=1&only=screen"
+        if let url = comps.url { web.load(URLRequest(url: url)) }
+        return web
+    }
+    func updateUIView(_ web: WKWebView, context: Context) {}
 }

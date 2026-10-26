@@ -159,6 +159,8 @@ struct PetView: View {
                 drawer(h: h, m: m)
                 seam(h: h, m: m, width: geo.size.width)
             }
+            .coordinateSpace(name: drawerWorld)
+            .onChange(of: h) { stage(height: $0, m, dragging: dragging) }
             .onAppear {
                 container = geo.size.height
                 stage(height: m.height(detent), m, dragging: false)
@@ -171,14 +173,19 @@ struct PetView: View {
     /// state), open = MyMu's chat. The tab bar leaves while it is open (a
     /// conversation is full-screen content).
     private func drawer(h: CGFloat, m: DrawerMetrics) -> some View {
-        ChatDrawer(height: h,
+        ChatDrawer(height: m.height(detent),
+                   top: m.full - m.height(detent),
+                   lift: h - m.height(detent),
                    handleZone: detent == .closed ? .infinity : 64,
                    onDrag: { d in drag(d, m) },
                    onRelease: { d, coast in release(d, coast, m) }) {
             if detent != .closed {
-                BrainChatRoot(chatURL: chatURL, host: mymuHost, agentName: mymuAgent,
-                              showVoiceButton: detent == .full,
-                              onVoice: { backToVoice(m) })
+                // Equatable: a drag re-renders PetView ~120×/s; the conversation
+                // must not re-evaluate with it.
+                EquatableView(content: DrawerChat(chatURL: chatURL, host: mymuHost,
+                                                  agentName: mymuAgent,
+                                                  full: detent == .full,
+                                                  onVoice: { backToVoice(m) }))
                     .transition(.opacity)
             } else {
                 BrainPeek(agentName: mymuAgent, chatURL: chatURL)
@@ -217,9 +224,8 @@ struct PetView: View {
     // MARK: - drawer mechanics
 
     private func drag(_ delta: CGFloat, _ m: DrawerMetrics) {
-        dragging = true
+        if !dragging { dragging = true }
         dragDelta = delta
-        stage(height: m.clamp(m.height(detent) + delta), m, dragging: true)
     }
 
     private func release(_ delta: CGFloat, _ coast: CGFloat, _ m: DrawerMetrics) {
@@ -234,6 +240,7 @@ struct PetView: View {
             dragDelta = 0
             dragging = false
         }
+        // the embed animates its own CSS transition to the resting stage
         stage(height: m.height(target), m, dragging: false)
         if changed {
             Haptics.send()
@@ -252,7 +259,7 @@ struct PetView: View {
 
     /// Re-compose the stage: the swarm shifts up by half the drawer's rise and
     /// shrinks towards 78% as the drawer reaches half height, so it re-centres
-    /// in the space it has left. Overlay controls in the embed clear the peek.
+    /// in the space it has left.
     private func stage(height h: CGFloat, _ m: DrawerMetrics, dragging: Bool) {
         let rise = max(0, h - m.closed)
         let p = min(1, rise / max(1, m.half - m.closed))
@@ -283,6 +290,25 @@ struct PetView: View {
 }
 
 // MARK: - wiring
+
+/// The drawer's MyMu conversation, compared by its inputs only (the closure is
+/// rebuilt every render but always does the same thing).
+private struct DrawerChat: View, Equatable {
+    let chatURL: String
+    let host: String
+    let agentName: String
+    let full: Bool
+    let onVoice: () -> Void
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.chatURL == b.chatURL && a.host == b.host && a.agentName == b.agentName && a.full == b.full
+    }
+
+    var body: some View {
+        BrainChatRoot(chatURL: chatURL, host: host, agentName: agentName,
+                      showVoiceButton: full, onVoice: onVoice)
+    }
+}
 
 /// Voice → avatar: state, levels, moves, hand-off chips. Split out of PetView's
 /// body so the type-checker has a chain it can finish.
