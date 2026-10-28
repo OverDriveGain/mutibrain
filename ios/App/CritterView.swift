@@ -89,6 +89,15 @@ final class CritterController: ObservableObject {
         // at whatever rate the web process keeps up with (was a fixed 30Hz).
         if !stageInFlight { flushStage() }
     }
+    /// App back in the foreground: WebKit throttles/suspends a backgrounded
+    /// page, so state and stage pushed meanwhile may never have landed —
+    /// re-send everything the page should be showing.
+    func resync() {
+        apply()
+        reassertStage()
+        pushCapabilities()
+        refreshPending()
+    }
     fileprivate func reassertStage() {
         if stageJS.isEmpty { stageJS = lastStageJS }
         stageInFlight = false
@@ -271,6 +280,13 @@ struct CritterView: UIViewRepresentable {
                 UIApplication.shared.open(url)
             }
             return nil
+        }
+        /// iOS kills a backgrounded page's web process to reclaim memory; the
+        /// webview then sits frozen on its last frame (an idle-looking swarm
+        /// while she talks). Reload — didFinish re-asserts state + stage.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            GadkVoice.beacon("embed-process-terminated")
+            webView.reload()
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             controller.apply()

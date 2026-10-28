@@ -87,6 +87,20 @@ final class GadkVoice: ObservableObject {
     private let sendChunkBytes = 3200 * 2     // ~200 ms @ 16 kHz, matches the web client
     private var newAgentTurn = true
 
+    /// Bumped by every start() and stop(). An async connect, a socket callback
+    /// or a playback-drained callback belonging to an OLDER conversation must
+    /// never touch the current one — a quick stop→start (or an app close/reopen
+    /// mid-connect) otherwise let the old socket's late failure stop the NEW
+    /// session, or let an abandoned connect start the engine + socket with the
+    /// button showing idle (agent talking, UI "not talking"). Main thread only.
+    private var epoch = 0
+    /// The server said turnComplete; `answering` drops only once the player has
+    /// also played out what's queued (the reply streams faster than real time,
+    /// so turnComplete arrives seconds before the voice actually stops).
+    private var turnDone = true
+    /// Buffers scheduled on the player and not yet played back (AudioGraph.q only).
+    private var queuedBuffers = 0
+
     /// TEMP diagnostics: report milestones to the server's public /healthz as a
     /// query string, so they land in the server's access log — readable without
     /// any device tooling. Remove once the voice path is stable.
@@ -117,7 +131,9 @@ final class GadkVoice: ObservableObject {
     func start() {
         endRequested = false
         guard !active else { return }
-        active = true; caption = ""; answering = false; newAgentTurn = true
+        epoch += 1
+        let myEpoch = epoch
+        active = true; caption = ""; answering = false; newAgentTurn = true; turnDone = true
         stageText = "Connecting to server…"
         connectStage = "loaded25"
         // A conversation is hands-free — don't let the screen auto-lock and
@@ -136,7 +152,7 @@ final class GadkVoice: ObservableObject {
                 DispatchQueue.main.async { self.stop() }
                 return
             }
-            Task { await self.connectAndRun() }
+            Task { await self.connectAndRun(epoch: myEpoch) }
         }
     }
 
@@ -151,10 +167,26 @@ final class GadkVoice: ObservableObject {
     func stop() {
         guard active else { return }
         beacon("stop-called")
+        epoch += 1
+        turnDone = true
         active = false; answering = false; caption = ""; stageText = ""; connectStage = ""; micLevel = 0; outLevel = 0
         UIApplication.shared.isIdleTimerDisabled = false
         ws?.send(.string("{\"close\":true}")) { _ in }
         ws?.cancel(with: .goingAway, reason: nil); ws = nil
+        teardownAudio()
+        sendQueue.async { [weak self] in self?.pendingSend.removeAll() }
+        tapFired = false
+        micConverter = nil
+        playDiagSent = false
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers.removeAll()
+        // Session restore/release happens in teardownAudio's q-block, strictly
+        // AFTER the engine teardown — never from here (racing the graph
+        // queue on session state is what got the app watchdog-killed).
+    }
+
+    /// Engine down, voice processing off, session back to .media (or released).
+    private func teardownAudio() {
         AudioGraph.q.async { [self] in
             AudioGraph.guarded("gadk-stop") {
                 if engine.isRunning {
@@ -163,6 +195,7 @@ final class GadkVoice: ObservableObject {
                     engine.stop()
                 }
                 player.stop()
+                queuedBuffers = 0   // a stopped player holds nothing
             }
             // Leave call mode IN ORDER: engine down first, THEN voice
             // processing off, THEN the session back to .media so music/
@@ -183,36 +216,46 @@ final class GadkVoice: ObservableObject {
                 DispatchQueue.main.async { SubsonicPlayer.shared.unduckAfterConversation() }
             }
         }
-        sendQueue.async { [weak self] in self?.pendingSend.removeAll() }
-        tapFired = false
-        micConverter = nil
-        playDiagSent = false
-        observers.forEach { NotificationCenter.default.removeObserver($0) }
-        observers.removeAll()
-        // Session restore/release happens in the q-block above, strictly
-        // AFTER the engine teardown — never from here (racing the graph
-        // queue on session state is what got the app watchdog-killed).
     }
 
     // MARK: - Connect
 
-    private func connectAndRun() async {
+    private func isCurrent(_ e: Int) async -> Bool {
+        await MainActor.run { self.epoch == e && self.active }
+    }
+
+    /// The user stopped (or restarted) while this connect was in flight: undo
+    /// what it started — unless a NEWER conversation is live and owns the engine.
+    private func abandon(_ what: String, engineStarted: Bool) async {
+        beacon("start-abandoned-\(what)")
+        if engineStarted { await MainActor.run { if !self.active { self.teardownAudio() } } }
+    }
+
+    private func connectAndRun(epoch e: Int) async {
         do {
             let target = Target.from(SharedConfig.load().gadkURL)
             let sid = try await createSession(target: target)
             beacon("session-ok")
+            guard await isCurrent(e) else { return await abandon("session", engineStarted: false) }
             await MainActor.run { stageText = "✓ Server up — starting audio…"; connectStage = "loaded50" }
             try startEngine()   // asserts the .conversation session state on q
             beacon("engine-ok")
-            openSocket(target: target, sessionId: sid)
+            // check + open atomically on main, so a stop() can't slip between them
+            let opened = await MainActor.run { () -> Bool in
+                guard self.epoch == e && self.active else { return false }
+                self.openSocket(target: target, sessionId: sid)
+                self.stageText = "✓ Server up — connecting to Google…"; self.connectStage = "loaded75"
+                return true
+            }
+            guard opened else { return await abandon("engine", engineStarted: true) }
             beacon("ws-opening")
-            await MainActor.run { stageText = "✓ Server up — connecting to Google…"; connectStage = "loaded75" }
         } catch {
             beacon("start-FAILED-\(error.localizedDescription)")
             NSLog("GadkVoice start failed: \(error.localizedDescription)")
             DispatchQueue.main.async { [weak self] in
-                self?.stop()
-                self?.stageText = "✗ Couldn't reach the server — check connection, tap to retry"
+                guard let self, self.epoch == e else { return }
+                self.stop()
+                self.stageText = "✗ Couldn't reach the server — check connection, tap to retry"
             }
         }
     }
@@ -253,7 +296,7 @@ final class GadkVoice: ObservableObject {
         let task = URLSession.shared.webSocketTask(with: comps.url!)
         ws = task
         task.resume()
-        receiveLoop()
+        receiveLoop(task)
     }
 
     // MARK: - Audio engine
@@ -412,6 +455,7 @@ final class GadkVoice: ObservableObject {
     private func rebuildPlaybackLocked() {
         AudioGraph.guarded("gadk-rebuild-teardown") {
             player.stop()
+            queuedBuffers = 0   // a stopped player holds nothing
             engine.stop()
             engine.disconnectNodeOutput(player)
         }
@@ -524,8 +568,11 @@ final class GadkVoice: ObservableObject {
 
     // MARK: - Receive
 
-    private func receiveLoop() {
-        ws?.receive { [weak self] result in
+    /// Bound to ITS socket: once stop() drops `task` (or a new conversation
+    /// opened another), its late callbacks are ignored instead of acting on
+    /// whatever session is current.
+    private func receiveLoop(_ task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let err):
@@ -534,9 +581,9 @@ final class GadkVoice: ObservableObject {
                 // The server ends a goodbye by CLOSING the socket (normal
                 // closure) — that's the conversation finishing as asked, not
                 // a lost connection: end quietly, no error line.
-                let normal = self.ws?.closeCode == .normalClosure || self.ws?.closeCode == .goingAway
+                let normal = task.closeCode == .normalClosure || task.closeCode == .goingAway
                 DispatchQueue.main.async {
-                    if self.active {
+                    if self.active && self.ws === task {
                         let asked = self.endRequested || normal
                         self.stop()
                         if asked { Self.beacon("ended-by-agent") }
@@ -545,9 +592,12 @@ final class GadkVoice: ObservableObject {
                 }
             case .success(let msg):
                 if case .string(let text) = msg {
-                    DispatchQueue.main.async { self.handleEvent(text) }
+                    DispatchQueue.main.async {
+                        guard self.ws === task else { return }
+                        self.handleEvent(text)
+                    }
                 }
-                self.receiveLoop()
+                self.receiveLoop(task)
             }
         }
     }
@@ -574,7 +624,10 @@ final class GadkVoice: ObservableObject {
             return
         }
 
-        if ev["interrupted"] as? Bool == true { flushPlayback() }   // barge-in
+        if ev["interrupted"] as? Bool == true {   // barge-in: her turn is over
+            turnDone = true
+            flushPlayback()
+        }
 
         if let content = ev["content"] as? [String: Any],
            let parts = content["parts"] as? [[String: Any]] {
@@ -668,6 +721,7 @@ final class GadkVoice: ObservableObject {
                    let b64 = inline["data"] as? String {
                     if !answering { Self.beacon("got-audio") }
                     answering = true
+                    turnDone = false
                     stageText = ""   // the voice itself is the feedback now
                     connectStage = ""
                     playPcm(b64)
@@ -683,8 +737,9 @@ final class GadkVoice: ObservableObject {
             answering = true
         }
         if ev["turnComplete"] as? Bool == true {
-            answering = false
+            turnDone = true
             newAgentTurn = true
+            settleAnswering()
         }
     }
 
@@ -767,8 +822,25 @@ final class GadkVoice: ObservableObject {
             }
             AudioGraph.guarded("gadk-schedule") {
                 if !self.player.isPlaying { self.player.play() }
-                self.player.scheduleBuffer(out, completionHandler: nil)
+                self.queuedBuffers += 1
+                self.player.scheduleBuffer(out, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                    AudioGraph.q.async {
+                        guard let self else { return }
+                        self.queuedBuffers = max(0, self.queuedBuffers - 1)
+                        if self.queuedBuffers == 0 { DispatchQueue.main.async { self.settleAnswering() } }
+                    }
+                }
             }
+        }
+    }
+
+    /// Main thread: the assistant stops "answering" only when the server's turn
+    /// is done AND the speaker has played everything queued.
+    private func settleAnswering() {
+        guard answering, turnDone else { return }
+        AudioGraph.q.async { [weak self] in
+            guard let self, self.queuedBuffers == 0 else { return }
+            DispatchQueue.main.async { if self.turnDone { self.answering = false } }
         }
     }
 
@@ -782,8 +854,10 @@ final class GadkVoice: ObservableObject {
             guard let self else { return }
             AudioGraph.guarded("gadk-flush") {
                 self.player.stop()
+                self.queuedBuffers = 0   // a stopped player holds nothing
                 if self.engine.isRunning { self.player.play() }
             }
+            DispatchQueue.main.async { self.settleAnswering() }
         }
     }
 

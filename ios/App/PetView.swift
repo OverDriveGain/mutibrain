@@ -316,9 +316,16 @@ private struct VoiceWiring: ViewModifier {
     @ObservedObject var voice: GadkVoice
     let critter: CritterController
     let critterState: String
+    @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
         content
+            .onChange(of: scenePhase) { phase in
+                guard phase == .active else { return }
+                critter.setState(critterState)
+                if !voice.active { critter.setLevel(0) }
+                critter.resync()
+            }
             .onChange(of: voice.active) { on in
                 critter.setState(critterState)
                 if !on { critter.setLevel(0) }
