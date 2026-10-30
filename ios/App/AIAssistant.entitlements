@@ -17,5 +17,9 @@
          enabled in the Apple Developer portal. -->
     <key>aps-environment</key>
     <string>production</string>
+    <!-- Important reminders push with interruption-level time-sensitive
+         (2026-10-30): without this entitlement iOS silently downgrades them. -->
+    <key>com.apple.developer.usernotifications.time-sensitive</key>
+    <true/>
 </dict>
 </plist>

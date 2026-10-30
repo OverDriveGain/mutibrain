@@ -175,10 +175,44 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
 
     /// Foreground arrival: still show the banner + sound so an in-app share is
     /// never silent (the webview's own banner also handles it — harmless overlap).
+    /// An IMPORTANT reminder (2026-10-30) additionally raises the in-app card
+    /// that stays on screen until confirmed — a banner slides away, this doesn't.
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound])
+        let info = notification.request.content.userInfo
+        if (info["important"] as? Bool) == true || (info["important"] as? Int) == 1 {
+            let rid = (info["reminder_id"] as? String) ?? (info["id"] as? String) ?? ""
+            let text = (info["text"] as? String) ?? notification.request.content.body
+            NotificationCenter.default.post(name: .mymuImportant, object: nil,
+                                            userInfo: ["id": rid, "text": text])
+            GadkVoice.beacon("rem-important-foreground")
+        }
+        completionHandler([.banner, .list, .sound])
+    }
+
+    /// Tell the server the user confirmed an IMPORTANT reminder (Done, a tap,
+    /// or a snooze) so it stops repeating. No-op for ordinary ones.
+    static func ackReminder(_ info: [AnyHashable: Any]) {
+        guard (info["important"] as? Bool) == true || (info["important"] as? Int) == 1 else { return }
+        let rid = (info["reminder_id"] as? String) ?? (info["id"] as? String) ?? ""
+        ackReminder(id: rid)
+    }
+
+    static func ackReminder(id: String) {
+        let t = GadkVoice.feedTarget()
+        guard !id.isEmpty, !t.token.isEmpty, !t.token.contains("__") else { return }
+        var comps = URLComponents(url: t.origin.appendingPathComponent("reminders/ack"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [.init(name: "app", value: t.app), .init(name: "token", value: t.token),
+                            .init(name: "id", value: id)]
+        guard let url = comps.url else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            GadkVoice.beacon("rem-ack-\((resp as? HTTPURLResponse)?.statusCode ?? 0)")
+        }.resume()
+        NotificationCenter.default.post(name: .mymuImportantDone, object: nil, userInfo: ["id": id])
     }
 
     /// The user acted on a notification. "Copy" writes the clipboard in the
@@ -200,6 +234,7 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
             return
         }
         if response.actionIdentifier == snoozeActionId {
+            Self.ackReminder(info)   // the repeats stop; the snoozed copy rings later
             snoozeReminder(text: info["text"] as? String ?? "",
                            body: response.notification.request.content.body,
                            done: completionHandler)
@@ -207,11 +242,13 @@ final class PushNotifications: NSObject, UIApplicationDelegate, UNUserNotificati
         }
         if response.actionIdentifier == doneActionId {
             GadkVoice.beacon("rem-done")
+            Self.ackReminder(info)
             completionHandler()
             return
         }
         guard response.actionIdentifier == copyActionId else {
-            completionHandler()   // default/other → app opens; nothing else to do
+            Self.ackReminder(info)   // a plain tap on an important one confirms it too
+            completionHandler()      // default/other → app opens; nothing else to do
             return
         }
         let text = info["text"] as? String ?? ""

@@ -26,11 +26,13 @@ final class Dictation: ObservableObject {
     @Published var result: String?
 
     private let engine = AVAudioEngine()
-    private var converter: AVAudioConverter?
-    private let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000,
-                                       channels: 1, interleaved: true)!
-    private var pcm = Data()
-    private let lock = NSLock()
+    // Touched from the audio thread (the tap) under `lock`, not from the main
+    // actor — hence nonisolated.
+    nonisolated(unsafe) private var converter: AVAudioConverter?
+    nonisolated private let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000,
+                                                   channels: 1, interleaved: true)!
+    nonisolated(unsafe) private var pcm = Data()
+    nonisolated private let lock = NSLock()
     private var timer: Timer?
     private let maxSeconds = 300
     private var failTask: Task<Void, Never>?

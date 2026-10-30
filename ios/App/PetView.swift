@@ -31,6 +31,9 @@ struct PetView: View {
     /// closed-then-reopened drawer returns to the same conversation; a cold
     /// launch starts at the brain (nil).
     @State private var currentAgent: ChatTarget?
+    /// An IMPORTANT reminder that arrived while the app was open: the card
+    /// stays until the user confirms it (the server keeps ringing otherwise).
+    @State private var importantReminder: (id: String, text: String)?
 
     @State private var showSettings = false
     /// Opened by the web "Screen" massam via the mymuBroadcast bridge — shows the
@@ -117,6 +120,19 @@ struct PetView: View {
                 await BrainAccess.load(mymu, roster, chatURL: chatURL)
             }
             .onChange(of: mymuAgentsCSV) { _ in roster.agentFilter = rosterNames }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuImportant)) { n in
+                let id = (n.userInfo?["id"] as? String) ?? ""
+                let text = (n.userInfo?["text"] as? String) ?? ""
+                guard !text.isEmpty else { return }
+                Haptics.send()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    importantReminder = (id, text)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .mymuImportantDone)) { n in
+                guard let id = n.userInfo?["id"] as? String, id == importantReminder?.id else { return }
+                withAnimation { importantReminder = nil }
+            }
             .onChange(of: mymu.accountEpoch) { _ in
                 Task { await BrainAccess.load(mymu, roster, chatURL: chatURL) }
             }
@@ -153,6 +169,13 @@ struct PetView: View {
 
                 VStack(spacing: 14) {
                     header
+                    if let imp = importantReminder {
+                        ImportantCard(text: imp.text) {
+                            PushNotifications.ackReminder(id: imp.id)
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { importantReminder = nil }
+                        }
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     // What she's saying — quiet words at the top, never covering
                     // the avatar (was a big center-screen speech bubble).
                     if voice.active && !voice.caption.isEmpty {
@@ -434,6 +457,41 @@ private struct MassamWiring: ViewModifier {
     }
 }
 
+// MARK: - Important reminder card
+
+/// "Don't calm until you click it": the card for an important reminder that
+/// arrived while the app was open. No swipe-away, no timeout — only Done
+/// (which also stops the server's repeats).
+private struct ImportantCard: View {
+    let text: String
+    let onDone: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title3).foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Important reminder").font(.caption.weight(.bold)).foregroundStyle(.white.opacity(0.85))
+                Text(text).font(.system(.subheadline, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white).lineLimit(3)
+            }
+            Spacer(minLength: 6)
+            Button(action: onDone) {
+                Text("Done").font(.subheadline.weight(.bold))
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color.white.opacity(0.22), in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("important-done")
+        }
+        .padding(14)
+        .background(Color(red: 0.86, green: 0.17, blue: 0.24), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+        .accessibilityIdentifier("important-card")
+    }
+}
+
 // MARK: - Drag frame meter
 
 /// Measures the frames the display actually produced while the drawer was
@@ -535,3 +593,11 @@ private struct TalkButton: View {
 }
 
 #Preview { PetView() }
+
+
+extension Notification.Name {
+    /// An important reminder arrived while the app is open (id + text).
+    static let mymuImportant = Notification.Name("mymuImportant")
+    /// It was confirmed (Done / tap / snooze) — drop the card.
+    static let mymuImportantDone = Notification.Name("mymuImportantDone")
+}
