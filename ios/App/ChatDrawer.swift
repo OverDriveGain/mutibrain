@@ -123,10 +123,19 @@ struct ChatDrawer<Content: View>: View {
         // The surface: taller than the drawer so a lift above the resting
         // height never shows a gap under it (the excess sits below the screen).
         .background(alignment: .top) {
+            // The edge: a short gradient ABOVE the surface, not a shadow — a
+            // 20pt shadow on this ~2000pt-tall rect is a huge offscreen
+            // raster that the compositor re-blends over the live swarm on
+            // every frame of a drag.
             shape.fill(Theme.background)
                 .overlay(shape.stroke(Color.white.opacity(0.10), lineWidth: 1))
                 .frame(height: height + 1200)
-                .shadow(color: .black.opacity(0.5), radius: 20, y: -8)
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [.clear, .black.opacity(0.42)],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: 26)
+                        .offset(y: -26)
+                }
                 .allowsHitTesting(false)
         }
         .offset(y: -lift)

@@ -18,8 +18,10 @@
     <key>aps-environment</key>
     <string>production</string>
     <!-- Important reminders push with interruption-level time-sensitive
-         (2026-10-30): without this entitlement iOS silently downgrades them. -->
-    <key>com.apple.developer.usernotifications.time-sensitive</key>
-    <true/>
+         (2026-10-30). The entitlement com.apple.developer.usernotifications.time-sensitive
+         is NOT here yet: adding it needs the App ID capability, which Xcode could not
+         register because the developer account has a pending Program License
+         Agreement ("PLA Update available", build 28). Accept it at developer.apple.com,
+         then add the key back and rebuild. -->
 </dict>
 </plist>
