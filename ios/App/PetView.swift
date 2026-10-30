@@ -23,6 +23,14 @@ struct PetView: View {
     private var mymuHost: String = "https://code.kaxtus.com"
     @AppStorage("mymuAgent", store: UserDefaults(suiteName: SharedConfig.appGroup))
     private var mymuAgent: String = "special-agent"
+    /// The drawer's swipe roster (comma-joined, brain first) — from /config
+    /// `mymu.agents`, the profile's curated list (brain.mymu_agents).
+    @AppStorage("mymuAgents", store: UserDefaults(suiteName: SharedConfig.appGroup))
+    private var mymuAgentsCSV: String = ""
+    /// The agent the drawer is on when it is not the brain. Lives HERE so a
+    /// closed-then-reopened drawer returns to the same conversation; a cold
+    /// launch starts at the brain (nil).
+    @State private var currentAgent: ChatTarget?
 
     @State private var showSettings = false
     /// Opened by the web "Screen" massam via the mymuBroadcast bridge — shows the
@@ -90,6 +98,7 @@ struct PetView: View {
             .modifier(MassamWiring(showScreenpipe: $showScreenpipe))
             .onAppear {
                 GadkVoice.beacon("app-launched")
+                BroadcastWatch.shared.start()
                 let t = GadkVoice.feedTarget()
                 critter.startFeeds(origin: t.origin, app: t.app, token: t.token)
                 critter.setStage(shift: 0, scale: 1, inset: DrawerMetrics.peek, dragging: false)
@@ -100,10 +109,14 @@ struct PetView: View {
             .task(id: chatURL + "|" + mymuHost + "|" + mymuAgent) {
                 if !hintFetched {
                     hintFetched = true
-                    await MyMuHint.fetch { h, a in mymuHost = h; mymuAgent = a }
+                    await MyMuHint.fetch { h, a, list in
+                        mymuHost = h; mymuAgent = a; mymuAgentsCSV = list.joined(separator: ",")
+                    }
                 }
+                roster.agentFilter = rosterNames
                 await BrainAccess.load(mymu, roster, chatURL: chatURL)
             }
+            .onChange(of: mymuAgentsCSV) { _ in roster.agentFilter = rosterNames }
             .onChange(of: mymu.accountEpoch) { _ in
                 Task { await BrainAccess.load(mymu, roster, chatURL: chatURL) }
             }
@@ -185,10 +198,11 @@ struct PetView: View {
                 EquatableView(content: DrawerChat(chatURL: chatURL, host: mymuHost,
                                                   agentName: mymuAgent,
                                                   full: detent == .full,
-                                                  onVoice: { backToVoice(m) }))
+                                                  currentAgent: $currentAgent,
+                                                  onDictate: { dictate() }))
                     .transition(.opacity)
             } else {
-                BrainPeek(agentName: mymuAgent, chatURL: chatURL)
+                BrainPeek(agentName: mymuAgent, chatURL: chatURL, current: currentProject)
                     .contentShape(Rectangle())
                     .onTapGesture { snap(.half, m) }
             }
@@ -221,10 +235,29 @@ struct PetView: View {
         .allowsHitTesting(!(detent == .full && !dragging))
     }
 
+    /// The drawer's roster: the curated list from /config, else the brain alone.
+    private var rosterNames: [String] {
+        let names = mymuAgentsCSV.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return names.isEmpty ? [mymuAgent] : names
+    }
+
+    private var currentProject: Project? {
+        guard let t = currentAgent else { return nil }
+        return roster.agents.first { $0.projectId == t.projectId }
+    }
+
+    /// The full-screen mic: dictation into the composer. One mic — a running
+    /// voice conversation ends first.
+    private func dictate() {
+        if voice.active { voice.stop() }
+        Dictation.shared.toggle()
+    }
+
     // MARK: - drawer mechanics
 
     private func drag(_ delta: CGFloat, _ m: DrawerMetrics) {
-        if !dragging { dragging = true }
+        if !dragging { dragging = true; DragMeter.shared.start() }
         dragDelta = delta
     }
 
@@ -235,6 +268,8 @@ struct PetView: View {
 
     private func snap(_ target: DrawerDetent, _ m: DrawerMetrics) {
         let changed = target != detent
+        if dragging { DragMeter.shared.stop() }
+        if target != .full { Dictation.shared.cancel() }   // dictation is a full-screen thing
         withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
             detent = target
             dragDelta = 0
@@ -246,15 +281,6 @@ struct PetView: View {
             Haptics.send()
             GadkVoice.beacon("drawer-\(target)")
         }
-    }
-
-    /// From the full conversation back to talking: the drawer drops to half
-    /// (the swarm comes back above it) and the voice session starts if it
-    /// isn't running — one tap from writing to speaking.
-    private func backToVoice(_ m: DrawerMetrics) {
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        snap(.half, m)
-        if !voice.active { voice.toggle() }
     }
 
     /// Re-compose the stage: the swarm shifts up by half the drawer's rise and
@@ -298,15 +324,17 @@ private struct DrawerChat: View, Equatable {
     let host: String
     let agentName: String
     let full: Bool
-    let onVoice: () -> Void
+    let currentAgent: Binding<ChatTarget?>
+    let onDictate: () -> Void
 
     static func == (a: Self, b: Self) -> Bool {
         a.chatURL == b.chatURL && a.host == b.host && a.agentName == b.agentName && a.full == b.full
+            && a.currentAgent.wrappedValue == b.currentAgent.wrappedValue
     }
 
     var body: some View {
         BrainChatRoot(chatURL: chatURL, host: host, agentName: agentName,
-                      showVoiceButton: full, onVoice: onVoice)
+                      dictation: full, onDictate: onDictate, currentAgent: currentAgent)
     }
 }
 
@@ -328,7 +356,17 @@ private struct VoiceWiring: ViewModifier {
             }
             .onChange(of: voice.active) { on in
                 critter.setState(critterState)
-                if !on { critter.setLevel(0) }
+                if !on {
+                    critter.setLevel(0)
+                    // A stop right after the app comes back (or while the
+                    // webview is still throttled) can land on a page that is
+                    // not listening yet: say "idle" again a beat later.
+                    for d in [0.5, 2.0] {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + d) {
+                            if !voice.active { critter.setState("idle") }
+                        }
+                    }
+                }
             }
             .onChange(of: voice.answering) { _ in critter.setState(critterState) }
             .onChange(of: voice.connectStage) { _ in critter.setState(critterState) }
@@ -396,6 +434,45 @@ private struct MassamWiring: ViewModifier {
     }
 }
 
+// MARK: - Drag frame meter
+
+/// Measures the frames the display actually produced while the drawer was
+/// dragged and reports them as a beacon (`drag-frames-N-slow-M-worst-Xms`):
+/// "it's laggy" becomes a number we can read from prod logs.
+final class DragMeter {
+    static let shared = DragMeter()
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval = 0
+    private var frames = 0, slow = 0
+    private var worst: CFTimeInterval = 0
+
+    func start() {
+        stop(report: false)
+        frames = 0; slow = 0; worst = 0; last = 0
+        let l = CADisplayLink(target: self, selector: #selector(tick))
+        l.add(to: .main, forMode: .common)
+        link = l
+    }
+
+    @objc private func tick(_ l: CADisplayLink) {
+        if last > 0 {
+            let dt = l.timestamp - last
+            frames += 1
+            if dt > 0.021 { slow += 1 }      // a dropped frame at 60 Hz
+            worst = max(worst, dt)
+        }
+        last = l.timestamp
+    }
+
+    func stop(report: Bool = true) {
+        guard let l = link else { return }
+        l.invalidate(); link = nil
+        if report && frames > 8 {
+            GadkVoice.beacon("drag-frames-\(frames)-slow-\(slow)-worst-\(Int(worst * 1000))ms")
+        }
+    }
+}
+
 // MARK: - Talk button
 
 /// Circular mic button. Background-less under the swarm (Manar 2026-07-27:
@@ -417,11 +494,14 @@ private struct TalkButton: View {
         Button(action: action) {
             ZStack {
                 if onSeam {
+                    // A plain fill, NOT a material: a material re-samples the
+                    // live swarm behind it every frame (a full backdrop pass of
+                    // the webview) and moves with the seam on every drag frame
+                    // — the biggest single cost of dragging the drawer.
                     Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 1))
+                        .fill(Color(red: 0.07, green: 0.06, blue: 0.12).opacity(0.86))
+                        .overlay(Circle().stroke(Color.white.opacity(0.16), lineWidth: 1))
                         .frame(width: 60, height: 60)
-                        .shadow(color: .black.opacity(0.5), radius: 10, y: 3)
                 }
                 if active {
                     Circle()

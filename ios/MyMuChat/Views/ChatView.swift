@@ -181,6 +181,13 @@ struct ChatView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        // HOST PATCH (MyAgent, 2026-10-30): a finished dictation (App/Dictation)
+        // drops into the draft like a picked slash command does.
+        .onReceive(Dictation.shared.$result) { text in
+            guard let text, !text.isEmpty else { return }
+            pendingInsert = text
+            Dictation.shared.result = nil
+        }
         // A conversation is full-screen content, not one more tab-bar screen —
         // the Projects/Chats/Agents/Archive bar only means something on the
         // list screens you picked this chat FROM. Hiding it here (rather than

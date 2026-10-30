@@ -42,7 +42,7 @@ final class DrawerUITests: XCTestCase {
         }
         sleep(3)
         save("03-full")
-        XCTAssertTrue(app.buttons["Back to voice"].waitForExistence(timeout: 4), "waveform button missing at full")
+        XCTAssertTrue(app.buttons["Dictate"].waitForExistence(timeout: 4), "dictation mic missing at full")
 
         // full -> half: drag the grabber back down to the middle
         let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.52))

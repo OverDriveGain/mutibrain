@@ -54,7 +54,25 @@ final class ProjectsStore: ObservableObject {
         if changed { projects = next }
     }
 
-    var agents: [Project] { projects.filter { $0.isRemoteAgent == true } }
+    /// HOST PATCH (MyAgent, 2026-10-30): the drawer's CURATED roster — agent
+    /// names in order (brain first). nil = every remote agent, MyMu's own
+    /// behaviour. Manar's host lists 350 remote sessions; the swipe switcher,
+    /// the dots and the peek all read `agents`, so one filter rules them all.
+    @Published var agentFilter: [String]? = nil
+    var agents: [Project] {
+        let all = projects.filter { $0.isRemoteAgent == true }
+        guard let names = agentFilter, !names.isEmpty else { return all }
+        var out: [Project] = []
+        for n in names {
+            let w = n.lowercased()
+            if let p = all.first(where: { $0.displayName.lowercased() == w })
+                ?? all.first(where: { ($0.sessions?.first?.summary ?? "").lowercased() == w }),
+               !out.contains(where: { $0.projectId == p.projectId }) {
+                out.append(p)
+            }
+        }
+        return out
+    }
     var folders: [Project] { projects.filter { $0.isRemoteAgent != true } }
 
     /// Flat, recency-sorted sessions across all local projects — the "Chats" tab.

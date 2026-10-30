@@ -23,34 +23,56 @@ struct BrainChatRoot: View {
     let chatURL: String
     let host: String
     let agentName: String
-    /// Drawer at full height: the nav bar carries the way back to voice.
-    let showVoiceButton: Bool
-    let onVoice: () -> Void
+    /// Drawer at full height = WRITING: the nav bar's mic DICTATES into the
+    /// composer (Dictation) instead of talking to the voice agent; the way
+    /// back to voice is dragging the drawer down to the seam mic.
+    let dictation: Bool
+    let onDictate: () -> Void
+    /// The conversation on screen when it is NOT the brain: MyMu's swipe
+    /// switcher (vendored, inside ChatView) or the dots above the chat hand
+    /// over another agent here. OWNED BY THE HOST (PetView) so closing and
+    /// reopening the drawer keeps you on the agent you were with; a cold
+    /// launch starts at the brain again (nil).
+    @Binding var currentAgent: ChatTarget?
 
     @State private var path: [Route] = []
-    /// The conversation on screen when it is NOT the brain: MyMu's swipe
-    /// switcher (vendored, inside ChatView) hands over another agent here.
-    @State private var switched: ChatTarget?
     /// Cross-dissolve for a switch, exactly as MyMu's MainTabView does it: the
     /// window snapshot taken at commit floats over the swapped-in chat and
     /// fades, so the switcher chrome melts away instead of cutting.
     @State private var switchDissolve: UIImage?
 
+    /// What the drawer shows: the agent switched to (while it is still in the
+    /// roster), else the brain.
+    private var activeTarget: ChatTarget? {
+        if let t = currentAgent, store.agents.contains(where: { $0.projectId == t.projectId }) {
+            return t
+        }
+        return store.brainTarget(named: agentName)
+    }
+
     var body: some View {
-        NavigationStack(path: $path) {
-            content
-                .navigationDestination(for: Route.self) { RouteView(route: $0) }
-                .toolbar {
-                    if showVoiceButton {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button(action: onVoice) {
-                                Image(systemName: "waveform")
-                                    .font(.body.weight(.semibold))
-                            }
-                            .accessibilityLabel("Back to voice")
+        VStack(spacing: 0) {
+            // Which agent you are with, and that there are others a swipe
+            // away: one dot per agent of the curated roster, the current one
+            // stretched (the page-control idiom). Tap a dot to jump.
+            AgentDots(roster: store.agents, currentId: activeTarget?.projectId) { p in
+                Haptics.send()
+                currentAgent = ChatTarget(
+                    sessionId: p.remoteSessionId ?? p.projectId.replacingOccurrences(of: "remote:", with: ""),
+                    projectId: p.projectId, isRemote: true, title: p.displayName)
+            }
+            NavigationStack(path: $path) {
+                content
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if dictation { DictationBar() }
+                    }
+                    .navigationDestination(for: Route.self) { RouteView(route: $0) }
+                    .toolbar {
+                        if dictation {
+                            ToolbarItem(placement: .topBarLeading) { DictateButton(action: onDictate) }
                         }
                     }
-                }
+            }
         }
         .tint(Theme.primary)
         .preferredColorScheme(.dark)
@@ -62,7 +84,7 @@ struct BrainChatRoot: View {
             t.disablesAnimations = true
             withTransaction(t) {
                 if let snap { switchDissolve = snap }
-                switched = target
+                currentAgent = target
             }
             if snap != nil {
                 DispatchQueue.main.async {
@@ -91,7 +113,7 @@ struct BrainChatRoot: View {
             MyMuSignIn(host: host, agentName: agentName)
         } else if store.loading && store.projects.isEmpty {
             ZStack { Theme.background.ignoresSafeArea(); MyMuLoader() }
-        } else if let target = switched ?? store.brainTarget(named: agentName) {
+        } else if let target = activeTarget {
             // THE conversation — MyMu's own route (host pinning, warm start,
             // identity keyed on session + resolved host, all as in MyMu).
             RouteView(route: .chat(target))
@@ -124,17 +146,118 @@ struct BrainChatRoot: View {
     }
 }
 
-/// The closed drawer's one line: who the brain is and what it is doing right
-/// now (MyMu's own status vocabulary: working… / agent / agent · offline).
-/// It is the handle — tap or drag it up.
+/// One dot per agent of the drawer's roster; hidden with a single agent.
+private struct AgentDots: View {
+    let roster: [Project]
+    let currentId: String?
+    let onPick: (Project) -> Void
+
+    var body: some View {
+        if roster.count > 1 {
+            HStack(spacing: 7) {
+                ForEach(roster, id: \.projectId) { p in
+                    let on = p.projectId == currentId
+                    Capsule()
+                        .fill(on ? Theme.primary : Color.white.opacity(0.26))
+                        .frame(width: on ? 20 : 6, height: 6)
+                        .contentShape(Rectangle().inset(by: -8))
+                        .onTapGesture { if !on { onPick(p) } }
+                        .accessibilityLabel(on ? "\(p.displayName), current" : "Switch to \(p.displayName)")
+                        .accessibilityAddTraits(.isButton)
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity)
+            .animation(.spring(response: 0.3, dampingFraction: 0.85), value: currentId)
+            .accessibilityIdentifier("agent-dots")
+        }
+    }
+}
+
+/// The nav-bar mic of the full-screen view: idle → tap to dictate; recording
+/// → a red stop; transcribing → a spinner.
+private struct DictateButton: View {
+    @ObservedObject private var dictation = Dictation.shared
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            switch dictation.phase {
+            case .recording:
+                Image(systemName: "stop.circle.fill")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Color(red: 1.0, green: 0.35, blue: 0.4))
+                    .symbolEffect(.pulse, isActive: true)
+            case .transcribing:
+                ProgressView().controlSize(.small)
+            default:
+                Image(systemName: "mic.fill").font(.body.weight(.semibold))
+            }
+        }
+        .disabled(dictation.phase == .transcribing)
+        .accessibilityLabel(dictation.phase == .recording ? "Finish dictation" : "Dictate")
+        .accessibilityIdentifier("dictate-button")
+    }
+}
+
+/// Under the nav bar while dictating: what is happening, and the level.
+private struct DictationBar: View {
+    @ObservedObject private var dictation = Dictation.shared
+
+    var body: some View {
+        if dictation.phase != .idle {
+            HStack(spacing: 10) {
+                switch dictation.phase {
+                case .recording:
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Text("Listening · \(dictation.seconds / 60):\(String(format: "%02d", dictation.seconds % 60))")
+                        .font(.footnote.weight(.semibold)).foregroundColor(Theme.text)
+                        .monospacedDigit()
+                    Capsule().fill(Color.white.opacity(0.12)).frame(height: 4)
+                        .overlay(alignment: .leading) {
+                            Capsule().fill(Theme.primary)
+                                .frame(width: max(6, 120 * CGFloat(dictation.level)), height: 4)
+                                .animation(.linear(duration: 0.08), value: dictation.level)
+                        }
+                        .frame(width: 120)
+                    Spacer(minLength: 0)
+                    Text("tap the mic to finish").font(.caption).foregroundColor(Theme.mutedText)
+                case .transcribing:
+                    ProgressView().controlSize(.small)
+                    Text("Transcribing…").font(.footnote.weight(.semibold)).foregroundColor(Theme.text)
+                    Spacer(minLength: 0)
+                case .failed(let msg):
+                    Image(systemName: "exclamationmark.circle").foregroundColor(.red)
+                    Text(msg).font(.footnote).foregroundColor(.red).lineLimit(2)
+                    Spacer(minLength: 0)
+                case .idle:
+                    EmptyView()
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Theme.background)
+            .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1) }
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .accessibilityIdentifier("dictation-bar")
+        }
+    }
+}
+
+/// The closed drawer's one line: who you are with (the agent switched to, else
+/// the brain) and what it is doing right now (MyMu's own status vocabulary:
+/// working… / agent / agent · offline). It is the handle — tap or drag it up.
 @MainActor
 struct BrainPeek: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var store: ProjectsStore
     let agentName: String
     let chatURL: String
+    /// The agent the drawer is on, when it is not the brain.
+    var current: Project? = nil
 
-    private var agent: Project? { store.brainAgent(named: agentName) ?? store.onlyAgent }
+    private var agent: Project? { current ?? store.brainAgent(named: agentName) ?? store.onlyAgent }
     private var signedIn: Bool { appState.isAuthenticated || BrainAccess.legacyToken(in: chatURL) != nil }
 
     var body: some View {
@@ -245,7 +368,9 @@ enum BrainAccess {
 /// which agent's conversation the drawer opens. One fetch per build of the
 /// Buddy screen; the result is cached in @AppStorage by the caller.
 enum MyMuHint {
-    static func fetch(_ apply: @escaping (String, String) -> Void) async {
+    /// apply(host, brain agent, the curated swipe roster — brain first; the
+    /// brain alone when the profile names no others).
+    static func fetch(_ apply: @escaping (String, String, [String]) -> Void) async {
         let t = GadkVoice.feedTarget()
         guard !t.app.isEmpty, !t.token.isEmpty, !t.token.contains("__") else { return }
         var comps = URLComponents(url: t.origin, resolvingAgainstBaseURL: false)!
@@ -259,6 +384,7 @@ enum MyMuHint {
               let host = mymu["host"] as? String, !host.isEmpty,
               let agent = mymu["agent"] as? String, !agent.isEmpty
         else { return }
-        await MainActor.run { apply(host, agent) }
+        let list = ((mymu["agents"] as? [String]) ?? []).filter { !$0.isEmpty }
+        await MainActor.run { apply(host, agent, list.isEmpty ? [agent] : list) }
     }
 }

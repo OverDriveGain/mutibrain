@@ -19,3 +19,11 @@ URL scheme (QRAccess). MyMu's own Info.plist / assets / entitlements are not
 copied (the harness logos are, into App/Assets.xcassets). The host side lives
 in App/BrainChat.swift (sign-in + which agent) and App/ChatDrawer.swift +
 App/PetView.swift (the voice <-> chat drawer).
+
+
+## Host patches (re-apply after a re-vendor)
+
+- `Core/ProjectsStore.swift` — `agentFilter: [String]?` + `agents` honouring it
+  (the drawer's curated swipe roster, 2026-10-30).
+- `Views/ChatView.swift` — `.onReceive(Dictation.shared.$result)` → `pendingInsert`
+  (dictation lands in the composer, 2026-10-30).

@@ -89,6 +89,17 @@ final class CritterController: ObservableObject {
         // at whatever rate the web process keeps up with (was a fixed 30Hz).
         if !stageInFlight { flushStage() }
     }
+    /// Runs `fn` once the page has installed `window.critter` (polled every
+    /// 120 ms for up to 6 s; a page that never gets there is simply not driven).
+    func whenReady(_ attempts: Int = 50, _ fn: @escaping () -> Void) {
+        guard let webView else { return }
+        webView.evaluateJavaScript("!!(window.critter && window.critter.setState)") { [weak self] r, _ in
+            if (r as? Bool) == true { fn(); return }
+            guard attempts > 1 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self?.whenReady(attempts - 1, fn) }
+        }
+    }
+
     /// App back in the foreground: WebKit throttles/suspends a backgrounded
     /// page, so state and stage pushed meanwhile may never have landed —
     /// re-send everything the page should be showing.
@@ -289,13 +300,17 @@ struct CritterView: UIViewRepresentable {
             webView.reload()
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            controller.apply()
-            // Re-push feed data after any (re)load — the fresh page starts empty.
-            controller.pushCapabilities()
-            controller.refreshPending()
-            // The stage (drawer composition) is page state — re-assert it once
-            // the module has set window.critter (async after load).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [controller] in controller.reassertStage() }
+            // The page's module script sets window.critter ASYNC after load: a
+            // state pushed at didFinish used to be dropped (`window.critter &&`
+            // guard) and the swarm sat in its default pose until the NEXT
+            // change — the "bees don't take the state" after a reload. Wait
+            // for the API, then push everything the page should be showing.
+            controller.whenReady { [controller] in
+                controller.apply()
+                controller.pushCapabilities()
+                controller.refreshPending()
+                controller.reassertStage()
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [controller] in controller.reassertStage() }
             // Report which embed the webview actually runs (cache diagnosis).
             // Delayed: the page's module script sets window.critter async.

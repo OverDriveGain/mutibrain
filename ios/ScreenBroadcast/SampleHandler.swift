@@ -2,6 +2,25 @@ import ReplayKit
 import CoreImage
 import CoreMedia
 import AVFoundation
+import os
+
+/// The extension's own breadcrumbs (2026-10-30, Manar: "the screen recording
+/// stops by itself sometimes"). An extension that dies leaves NO trace in the
+/// app, so it reports to the voice server's /healthz log like the app does:
+/// bcast-start / -paused / -resumed / -finished (the user or the system ended
+/// it cleanly) and a bcast-alive heartbeat every minute carrying the memory
+/// iOS still allows us (`os_proc_available_memory`, the ~50 MB cap) — a log
+/// that ends with a low-memory heartbeat and no -finished is a memory kill.
+enum BcastBeacon {
+    static func send(_ msg: String) {
+        let origin = SharedConfig.load().gadkURL
+        guard var c = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { return }
+        c.path = "/healthz"; c.query = nil; c.fragment = nil
+        c.queryItems = [.init(name: "dbg", value: msg)]
+        if let u = c.url { URLSession.shared.dataTask(with: u).resume() }
+    }
+    static var availableMB: Int { Int(os_proc_available_memory() / (1024 * 1024)) }
+}
 
 /// Runs in its own process while a system-wide broadcast is active. Receives
 /// every screen frame of the WHOLE device, downscales + JPEG-encodes a throttled
@@ -44,7 +63,14 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let audioSampleRate = 16000
     private let audioSegmentSeconds: Double = 20
     private var audioIngest: AudioIngestClient?
-    private var audioConverter: AVAudioConverter?
+    // One converter PER SOURCE FORMAT: the mic (48 kHz) and app audio (44.1 kHz)
+    // arrive interleaved, and a single converter re-created on every format
+    // flip churned allocations in a memory-capped process and reset the
+    // resampler's state each time (audible seams).
+    private var audioConverters: [String: AVAudioConverter] = [:]
+    private var started = CFAbsoluteTimeGetCurrent()
+    private var lastAlive = CFAbsoluteTimeGetCurrent()
+    private var frames = 0
     private let audioTarget = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                             sampleRate: 16000, channels: 1,
                                             interleaved: true)!
@@ -57,13 +83,26 @@ class SampleHandler: RPBroadcastSampleHandler {
         ingest = IngestClient(cfg: cfg)
         audioIngest = AudioIngestClient(cfg: cfg)
         segmentStart = Date()
+        started = CFAbsoluteTimeGetCurrent(); lastAlive = started; frames = 0
+        BcastBeacon.send("bcast-start-mem\(BcastBeacon.availableMB)MB")
     }
+
+    override func broadcastPaused() { BcastBeacon.send("bcast-paused") }
+    override func broadcastResumed() { BcastBeacon.send("bcast-resumed") }
 
     override func broadcastFinished() {
         ingest = nil
         flushAudioSegment()          // ship whatever's buffered
         audioIngest = nil
-        audioConverter = nil
+        audioConverters.removeAll()
+        BcastBeacon.send("bcast-finished-after\(Int(CFAbsoluteTimeGetCurrent() - started))s-frames\(frames)")
+    }
+
+    /// A heartbeat a minute: uptime + frames + the memory iOS still allows.
+    private func heartbeat(_ now: CFAbsoluteTime) {
+        guard now - lastAlive >= 60 else { return }
+        lastAlive = now
+        BcastBeacon.send("bcast-alive-\(Int((now - started) / 60))min-frames\(frames)-mem\(BcastBeacon.availableMB)MB")
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with type: RPSampleBufferType) {
@@ -78,6 +117,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard type == .video else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
+        heartbeat(now)
         guard now - lastSent >= minInterval else { return }
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -98,6 +138,7 @@ class SampleHandler: RPBroadcastSampleHandler {
                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: jpegQuality]
             ) else { return }
             lastSent = now
+            frames += 1
             ingest?.sendFrame(jpeg: jpeg)   // drops the frame if a POST is still in flight
         }
     }
@@ -121,10 +162,11 @@ class SampleHandler: RPBroadcastSampleHandler {
             sb, at: 0, frameCount: Int32(frames),
             into: src.mutableAudioBufferList) == noErr else { return }
 
-        if audioConverter == nil || audioConverter!.inputFormat != srcFormat {
-            audioConverter = AVAudioConverter(from: srcFormat, to: audioTarget)
+        let key = "\(asbd.pointee.mSampleRate)/\(asbd.pointee.mChannelsPerFrame)/\(asbd.pointee.mFormatFlags)"
+        if audioConverters[key] == nil {
+            audioConverters[key] = AVAudioConverter(from: srcFormat, to: audioTarget)
         }
-        guard let conv = audioConverter else { return }
+        guard let conv = audioConverters[key] else { return }
         let cap = AVAudioFrameCount(Double(frames) * audioTarget.sampleRate / srcFormat.sampleRate) + 32
         guard let out = AVAudioPCMBuffer(pcmFormat: audioTarget, frameCapacity: cap) else { return }
         var fed = false

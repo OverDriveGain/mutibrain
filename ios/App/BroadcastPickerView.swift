@@ -1,5 +1,6 @@
 import SwiftUI
 import ReplayKit
+import UserNotifications
 
 /// Wraps the system broadcast picker. Tapping it lets the user start a
 /// WHOLE-DEVICE screen broadcast that routes into our broadcast extension,
@@ -48,5 +49,48 @@ enum BroadcastLauncher {
         }
         button.sendActions(for: .touchUpInside)
         GadkVoice.beacon("broadcast-sheet")
+    }
+}
+
+
+/// Watches the device's capture state (`UIScreen.isCaptured`: our broadcast,
+/// any broadcast). When a capture that was running ENDS while the app is
+/// alive, it reports it and posts a local "tap to restart" notification with
+/// the same `mymu: broadcast` intent the Control widget and the server use,
+/// so the user is one tap from the broadcast sheet. iOS gives no API to
+/// restart a broadcast without that tap. The server's proactive loop covers
+/// the case where the app itself is suspended (frames stop → push).
+@MainActor
+final class BroadcastWatch {
+    static let shared = BroadcastWatch()
+    private var observer: NSObjectProtocol?
+    private var wasCaptured = UIScreen.main.isCaptured
+
+    func start() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(
+            forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let now = UIScreen.main.isCaptured
+            defer { self.wasCaptured = now }
+            if now && !self.wasCaptured { GadkVoice.beacon("screen-capture-started") }
+            if !now && self.wasCaptured {
+                GadkVoice.beacon("screen-capture-ended")
+                self.nudgeRestart()
+            }
+        }
+    }
+
+    private func nudgeRestart() {
+        let content = UNMutableNotificationContent()
+        content.title = "Screen broadcast stopped"
+        content.body = "Your screen is no longer being recorded — tap to start the broadcast again."
+        content.sound = .default
+        content.categoryIdentifier = "MYMU_NUDGE"
+        content.userInfo = ["mymu": "broadcast"]
+        let req = UNNotificationRequest(identifier: "bcast-stopped-\(Int(Date().timeIntervalSince1970))",
+                                        content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 }

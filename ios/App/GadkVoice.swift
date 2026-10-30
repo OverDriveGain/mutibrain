@@ -722,6 +722,7 @@ final class GadkVoice: ObservableObject {
                     if !answering { Self.beacon("got-audio") }
                     answering = true
                     turnDone = false
+                    settleTicks = 0
                     stageText = ""   // the voice itself is the feedback now
                     connectStage = ""
                     playPcm(b64)
@@ -839,10 +840,29 @@ final class GadkVoice: ObservableObject {
     private func settleAnswering() {
         guard answering, turnDone else { return }
         AudioGraph.q.async { [weak self] in
-            guard let self, self.queuedBuffers == 0 else { return }
-            DispatchQueue.main.async { if self.turnDone { self.answering = false } }
+            guard let self else { return }
+            if self.queuedBuffers == 0 {
+                DispatchQueue.main.async { if self.turnDone { self.answering = false } }
+                return
+            }
+            // Buffers still queued: a completion handler normally brings us
+            // back — but a player stopped by an interruption / rebuild while
+            // the app was in the background may never fire them, and the
+            // button would blink "talking" forever. Re-check until drained.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self, self.answering, self.turnDone else { return }
+                self.settleTicks += 1
+                if self.settleTicks > 12 {   // 12 s past the turn: nothing is playing
+                    AudioGraph.q.async { self.queuedBuffers = 0 }
+                    self.answering = false
+                    Self.beacon("answering-forced-off")
+                    return
+                }
+                self.settleAnswering()
+            }
         }
     }
+    private var settleTicks = 0
 
     private func flushPlayback() {
         // Barge-in. player.play() throws an uncatchable NSException if the
