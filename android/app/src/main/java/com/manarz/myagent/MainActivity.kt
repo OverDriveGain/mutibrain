@@ -153,8 +153,9 @@ private fun Root(deepLink: String?, consumeLink: () -> Unit) {
 
     LaunchedEffect(deepLink) {
         val l = deepLink ?: return@LaunchedEffect
+        // validate in the outer scope: consuming the link re-keys (cancels) this effect
+        scope.launch { validateLogin(l).fold(onSuccess = { Config.gadkURL = it; linkMsg = null }, onFailure = { linkMsg = it.message }) }
         consumeLink()
-        validateLogin(l).fold(onSuccess = { Config.gadkURL = it; linkMsg = null }, onFailure = { linkMsg = it.message })
     }
     LaunchedEffect(Unit) {
         Events.flow.collect { e ->

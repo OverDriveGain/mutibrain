@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyAgent for Android</title>
+<style>
+  :root { --bg:#050608; --fg:#f2f0ff; --muted:#9a96b3; --accent:#8e7bff; --card:#15141e; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, -apple-system, Roboto, sans-serif;
+         min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px 16px; }
+  main { max-width:420px; width:100%; text-align:center; }
+  img { width:96px; height:96px; border-radius:22px; }
+  h1 { font-size:28px; margin:18px 0 4px; }
+  p { color:var(--muted); margin:0 0 22px; }
+  a.btn { display:block; background:var(--accent); color:#100c2a; font-weight:700; text-decoration:none;
+          padding:15px; border-radius:999px; font-size:17px; }
+  ol { text-align:left; background:var(--card); border-radius:16px; padding:16px 16px 16px 36px; color:var(--muted);
+       font-size:14px; margin-top:22px; }
+  li + li { margin-top:6px; }
+  #ver { font-size:13px; margin-top:14px; color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <img src="icon.png" alt="" onerror="this.remove()">
+  <h1>MyAgent</h1>
+  <p>Your voice assistant, the swarm and the chat — for Android 10 and newer.</p>
+  <a class="btn" id="dl" href="myagent.apk" download>Download the app</a>
+  <div id="ver"></div>
+  <ol>
+    <li>Tap <b>Download</b>, then open the file.</li>
+    <li>If Android asks, allow your browser to <b>install unknown apps</b>.</li>
+    <li>Open MyAgent and scan the login QR from your assistant's admin page.</li>
+    <li>Updating: download again — it installs over the old version and keeps your login.</li>
+  </ol>
+</main>
+<script>
+  fetch('latest.json', { cache: 'no-store' }).then(r => r.json()).then(j => {
+    document.getElementById('ver').textContent = 'Version ' + j.versionName + ' · build ' + j.versionCode;
+    document.getElementById('dl').href = j.apk;
+  }).catch(() => {});
+</script>
+</body>
+</html>
