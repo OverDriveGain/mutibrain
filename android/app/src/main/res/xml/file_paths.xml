@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shareable roots for the app FileProvider: only the downloads corner of
+     the cache (ShareSheet writes there) and the camera corner (the composer's
+     capture target, handed to the system camera app), never the whole sandbox. -->
+<paths>
+    <cache-path name="downloads" path="downloads/" />
+    <cache-path name="camera" path="camera/" />
+</paths>

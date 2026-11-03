@@ -1,0 +1,12 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.jks
+*.keystore
+keystore.properties
+app/google-services.json
+app/src/main/assets/baked.properties
+.idea/
+*.iml
+captures/
