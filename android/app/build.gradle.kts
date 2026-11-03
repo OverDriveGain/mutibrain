@@ -75,6 +75,8 @@ dependencies {
     // background and Bluetooth controls come with the MediaSession.
     implementation("androidx.media3:media3-exoplayer:1.6.1")
     implementation("androidx.media3:media3-session:1.6.1")
+    // Album / artist covers in the Music tab (iOS AsyncImage).
+    implementation("io.coil-kt:coil-compose:2.7.0")
     // Push (FCM). Inert without app/google-services.json (see bottom).
     implementation("com.google.firebase:firebase-messaging:24.1.1")
     // QR login (scan) — CameraX + ML Kit's bundled barcode model (no Play
