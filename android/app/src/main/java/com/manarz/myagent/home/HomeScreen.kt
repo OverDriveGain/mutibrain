@@ -22,6 +22,9 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -237,7 +240,7 @@ fun HomeScreen(
                 .background(Color(0xFF0E0D16))
                 .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)),
         ) {
-            Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().then(if (detent == Detent.FULL && !dragging) Modifier.statusBarsPadding() else Modifier)) {
                 // grabber + drag zone (the whole peek row while closed)
                 Box(
                     Modifier.fillMaxWidth().height(if (detent == Detent.CLOSED) Metrics.PEEK.dp else 28.dp)
@@ -260,7 +263,9 @@ fun HomeScreen(
                     DrawerChat(full = detent == Detent.FULL, onDictate = {
                         if (GadkVoice.active.value) GadkVoice.stop()
                         Dictation.toggle()
-                    }, modifier = Modifier.weight(1f))
+                    }, modifier = Modifier.weight(1f)
+                        // the DRAWER owns the status-bar inset (padded below at FULL); MyMu's top bar must not add it again
+                        .consumeWindowInsets(WindowInsets.statusBars))
                 }
             }
         }

@@ -105,6 +105,7 @@ class MainActivity : ComponentActivity() {
         launchFileChooser = { fileChooser.launch(it) }
         askFirstRunPermissions()
         deepLink = linkFrom(intent)
+        PushModule.handleLaunch(intent, cold = true)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Stage, surface = Stage)) {
                 Root(deepLink) { deepLink = null }
@@ -114,6 +115,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        PushModule.handleLaunch(intent, cold = false)
         linkFrom(intent)?.let { deepLink = it }
         if (intent.getBooleanExtra(EXTRA_SCREENPIPE, false)) Events.post(AppEvent.ShowScreenpipe(present = false))
     }
@@ -169,7 +171,17 @@ private fun Root(deepLink: String?, consumeLink: () -> Unit) {
         overlay = if (overlay == Overlay.QR || overlay == Overlay.SCREENPIPE) Overlay.SETTINGS else Overlay.NONE
     }
 
-    // a new login rebuilds everything in place (iOS .id(gadkURL)) — no restart
+    // a new login rebuilds everything in place (iOS .id(gadkURL)) — no restart;
+    // its /config (MyMu host, roster, chat share link) must be fetched BEFORE the drawer reads it
+    var synced by remember(gadk) { mutableStateOf(!Target.from(gadk).hasToken) }
+    LaunchedEffect(gadk) {
+        if (Target.from(gadk).hasToken) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { ServerConfig.sync() }
+            PushModule.reregister()
+        }
+        synced = true
+    }
+    if (!synced) { Box(Modifier.fillMaxSize().background(Stage)); return }
     key(gadk) {
         Box(Modifier.fillMaxSize().background(Stage)) {
             com.manarz.myagent.capture.ScreenConsentHost()
