@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.view.HapticFeedbackConstants
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.ValueCallback
@@ -194,6 +195,10 @@ var launchFileChooser: ((Intent) -> Unit)? = null
 @SuppressLint("SetJavaScriptEnabled")
 fun makeCritterWebView(ctx: Context, ctl: CritterController, fragment: String): WebView {
     val web = WebView(ctx)
+    // MATCH_PARENT, not AndroidView's default WRAP_CONTENT: a wrap_content
+    // WebView makes Chromium resolve 100vh/dvh to 0, which collapsed every
+    // massam box to a 1px line (2026-11-03). The embed also self-heals (--app-h).
+    web.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
     web.setBackgroundColor(Color.rgb(5, 6, 8))        // #050608, under the swarm's edges
     web.isVerticalScrollBarEnabled = false
     web.isHorizontalScrollBarEnabled = false
