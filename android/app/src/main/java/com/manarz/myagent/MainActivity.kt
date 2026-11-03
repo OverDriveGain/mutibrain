@@ -172,6 +172,7 @@ private fun Root(deepLink: String?, consumeLink: () -> Unit) {
     // a new login rebuilds everything in place (iOS .id(gadkURL)) — no restart
     key(gadk) {
         Box(Modifier.fillMaxSize().background(Stage)) {
+            com.manarz.myagent.capture.ScreenConsentHost()
             if (!Target.from(gadk).hasToken) {
                 Welcome(linkMsg, onScan = { overlay = Overlay.QR }) { url ->
                     scope.launch { validateLogin(url).fold(onSuccess = { Config.gadkURL = it }, onFailure = { linkMsg = it.message }) }
