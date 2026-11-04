@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
         askFirstRunPermissions()
         deepLink = linkFrom(intent)
         PushModule.handleLaunch(intent, cold = true)
+        testHooks(intent)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Stage, surface = Stage)) {
                 Root(deepLink) { deepLink = null }
@@ -116,6 +117,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         PushModule.handleLaunch(intent, cold = false)
+        testHooks(intent)
         linkFrom(intent)?.let { deepLink = it }
         if (intent.getBooleanExtra(EXTRA_SCREENPIPE, false)) Events.post(AppEvent.ShowScreenpipe(present = false))
     }
@@ -126,6 +128,18 @@ class MainActivity : ComponentActivity() {
         ReportClient.flush()
         thread(name = "config-sync") { ServerConfig.sync() }
         PushModule.reregister()
+    }
+
+    /** DEBUG builds only: `--es feed_wav <path to 16 kHz mono PCM16 WAV>` speaks it into a new conversation. */
+    private fun testHooks(i: Intent?) {
+        if (!BuildConfig.DEBUG) return
+        val path = i?.getStringExtra("feed_wav") ?: return
+        val bytes = runCatching { java.io.File(path).readBytes() }.getOrNull() ?: return
+        val pcm = java.nio.ByteBuffer.wrap(bytes, 44, bytes.size - 44).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        val s = ShortArray(pcm.remaining()).also { pcm.get(it) }
+        com.manarz.myagent.voice.GadkVoice.stop()
+        com.manarz.myagent.voice.GadkVoice.testFeed = ShortArray(16000) + s + ShortArray(16000 * 4)   // a beat, speak, then quiet for the VAD
+        com.manarz.myagent.voice.GadkVoice.start()
     }
 
     private fun linkFrom(i: Intent?): String? {

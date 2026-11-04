@@ -297,16 +297,38 @@ object GadkVoice {
     private fun describeRoute(am: AudioManager): String =
         if (Build.VERSION.SDK_INT >= 31) "dev${am.communicationDevice?.type}" else "spk${@Suppress("DEPRECATION") am.isSpeakerphoneOn}"
 
+    /**
+     * DEBUG-ONLY test hook: 16 kHz mono PCM16 to stream INSTEAD of the mic, paced
+     * in real time and followed by silence (the server's VAD needs the trailing
+     * quiet to close the turn). Lets an emulator with no microphone run a real
+     * spoken turn end to end. Never set in release builds.
+     */
+    @Volatile var testFeed: ShortArray? = null
+
     private fun micLoop(rec: AudioRecord, e: Int) {
         val chunk = ShortArray(3200)            // ~200 ms @ 16 kHz, matches the web client
+        val feed = if (com.manarz.myagent.BuildConfig.DEBUG) testFeed.also { testFeed = null } else null
+        var feedPos = 0
+        val feedT0 = System.currentTimeMillis(); var feedSent = 0L
+        if (feed != null) Beacon.send("test-feed-${feed.size / 16000}s")
         var firstFire = true
         var logFrames = 0; var logPeak = 0
+        var sendFails = 0
         while (epoch.get() == e) {
             var got = 0
             while (got < chunk.size && epoch.get() == e) {
                 val n = rec.read(chunk, got, chunk.size - got)
                 if (n <= 0) { if (n < 0) Beacon.send("mic-read-ERR-$n"); break }
                 got += n
+            }
+            if (feed != null) {
+                // hold the speech until Google is connected, and pace it by the wall clock
+                // (a silent emulator mic doesn't block reads in real time)
+                if (_connectStage.value.isNotEmpty()) java.util.Arrays.fill(chunk, 0, got, 0)
+                else for (i in 0 until got) chunk[i] = if (feedPos < feed.size) feed[feedPos++] else 0
+                feedSent += got                 // sleep only when ahead of real time
+                val ahead = feedT0 + feedSent / 16L - System.currentTimeMillis()
+                if (ahead > 0) Thread.sleep(ahead)
             }
             if (got <= 0 || epoch.get() != e) continue
             if (firstFire) { firstFire = false; Beacon.send("tap-first-fire-16000Hz") }
@@ -319,7 +341,13 @@ object GadkVoice {
             val bytes = ByteArray(got * 2)
             for (i in 0 until got) { val v = chunk[i].toInt(); bytes[2 * i] = v.toByte(); bytes[2 * i + 1] = (v shr 8).toByte() }
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            ws?.send("{\"blob\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"$b64\"}}")
+            val w = ws
+            val ok = w?.send("{\"blob\":{\"mimeType\":\"audio/pcm;rate=16000\",\"data\":\"$b64\"}}") ?: false
+            // a refused send = the socket is closing or its 16 MB queue is full
+            if (w != null && !ok) {   // (no socket yet = the brief gap before openSocket)
+                sendFails++
+                if (sendFails % 50 == 1) Beacon.send("up-send-refused-$sendFails-q${w?.queueSize() ?: -1}")
+            }
         }
     }
 
@@ -371,8 +399,12 @@ object GadkVoice {
 
     // ---------------------------------------------------------------- events
 
+    private var rxCount = 0
+
     private fun handleEvent(json: String) {
         val ev = runCatching { JSONObject(json) }.getOrNull() ?: return
+        if (com.manarz.myagent.BuildConfig.DEBUG && ++rxCount <= 12)
+            Beacon.send("rx-$rxCount-" + ev.keys().asSequence().joinToString("+").take(80))
 
         ev.optString("mymuStage").takeIf { it.isNotEmpty() }?.let { st ->
             Beacon.send("stage-$st")

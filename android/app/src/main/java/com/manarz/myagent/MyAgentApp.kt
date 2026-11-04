@@ -35,6 +35,7 @@ class MyAgentApp : Application() {
 
         // If the previous run died, report what killed it; then say which build runs.
         CrashReporter.reportIfCrashed()
+        CrashReporter.reportExitReason(this)
         Beacon.send(AppBuild.tag)
         ReportClient.flush()
         thread(name = "config-sync") { ServerConfig.sync() }

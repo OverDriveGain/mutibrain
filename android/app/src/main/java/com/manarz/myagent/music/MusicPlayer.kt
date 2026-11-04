@@ -51,7 +51,6 @@ object MusicPlayer {
 
     /** A live conversation is on: the music sits under it (iOS ducking), restored after. */
     private var ducked = false
-    private const val DUCK_VOLUME = 0.3f
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
@@ -100,7 +99,11 @@ object MusicPlayer {
             .build())
         .build()
 
-    private fun applyVolume() { exo.volume = if (ducked) DUCK_VOLUME else 1f }
+    // The STANDARD platform duck does the work: the conversation takes transient
+    // may-duck focus and ExoPlayer (handleAudioFocus) lowers itself. A second manual
+    // duck on top stacked to ~6% — near silence (measured 2026-11-03). `ducked` only
+    // feeds the beacons now.
+    private fun applyVolume() { exo.volume = 1f }
 
     // ---------------------------------------------------------------- transport
 

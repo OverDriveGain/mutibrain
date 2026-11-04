@@ -1,3 +1,5 @@
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Properties
 
 plugins {
@@ -23,9 +25,12 @@ android {
         applicationId = "com.manarz.myagent"
         minSdk = 29          // MediaProjection foreground-service + AudioPlaybackCapture era
         targetSdk = 36
-        versionCode = 3
+        versionCode = 4
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // stamped at build time, shown in the home header (iOS MyMuBuildDate)
+        buildConfigField("String", "BUILD_DATE",
+            "\"" + SimpleDateFormat("MM-dd HH:mm").format(Date()) + "\"")
     }
 
     signingConfigs {
@@ -39,7 +44,13 @@ android {
         }
     }
     buildTypes {
+        // the debug app installs NEXT TO the release one (own id + test hooks)
+        debug {
+            applicationIdSuffix = ".debug"
+            manifestPlaceholders["appLabel"] = "MyAgent dev"
+        }
         release {
+            manifestPlaceholders["appLabel"] = "MyAgent"
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

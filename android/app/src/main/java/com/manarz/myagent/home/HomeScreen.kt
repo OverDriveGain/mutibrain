@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -138,6 +139,10 @@ fun HomeScreen(
         else -> connectStage
     }
 
+    // a conversation is hands-free: keep the screen awake while it runs (iOS isIdleTimerDisabled)
+    val view = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(active) { view.keepScreenOn = active; onDispose { view.keepScreenOn = false } }
+
     // ---- voice → avatar
     LaunchedEffect(critterState) {
         ctl.setState(critterState)
@@ -160,6 +165,17 @@ fun HomeScreen(
                 else -> {}
             }
         }
+    }
+    // back in the foreground: the throttled page may have missed state — re-assert it (iOS scenePhase .active)
+    val owner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                ctl.setState(critterState); if (!GadkVoice.active.value) ctl.setLevel(0f); ctl.resync()
+            }
+        }
+        owner.lifecycle.addObserver(obs)
+        onDispose { owner.lifecycle.removeObserver(obs) }
     }
     DisposableEffect(Unit) {
         Beacon.send("app-launched")
@@ -190,6 +206,11 @@ fun HomeScreen(
             if (changed) { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); Beacon.send("drawer-${target.name.lowercase()}") }
         }
 
+        // writing needs the room: the keyboard lifts a half drawer to full (iOS keyboardWillShow)
+        @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+        val ime = WindowInsets.isImeVisible
+        LaunchedEffect(ime) { if (ime && detent == Detent.HALF) snap(Detent.FULL) }
+
         // the container changed (keyboard, rotation) or the detent was set from outside
         LaunchedEffect(m.container, detent) { if (!dragging) { height.snapTo(m.height(detent)); stage(m.height(detent), false) } }
         LaunchedEffect(height.value) { if (dragging) stage(height.value, true) }
@@ -212,7 +233,9 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(AppBuild.header, color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                // the iOS header's pixel font (Press Start 2P, bundled in both apps)
+                Text(AppBuild.header, color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp,
+                    fontFamily = FontFamily(androidx.compose.ui.text.font.Font(com.manarz.myagent.R.font.press_start_2p)))
                 Spacer(Modifier.weight(1f))
                 IconButton(onClick = onSettings, modifier = Modifier.size(44.dp).semantics { contentDescription = "Settings" }) {
                     Icon(Icons.Filled.Settings, null, tint = Color.White.copy(alpha = 0.7f))

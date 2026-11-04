@@ -60,6 +60,8 @@ class CritterController {
     private var stageInFlight = false
     private var feedTimer: Runnable? = null
     private var feed: Target? = null
+    /** Sets --host-sat (status-bar inset) on the page; see makeCritterWebView. */
+    internal var insetJs = ""
 
     private fun js(s: String, cb: ((String?) -> Unit)? = null) =
         main.post { web?.evaluateJavascript(s) { r -> cb?.invoke(r) } }
@@ -211,15 +213,23 @@ fun makeCritterWebView(ctx: Context, ctl: CritterController, fragment: String): 
         setSupportMultipleWindows(true)                // target=_blank → onCreateWindow
     }
     web.addJavascriptInterface(NativeBridge(ctx.applicationContext) { ctl.web }, "MyAgentNative")
-    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-        WebViewCompat.addDocumentStartJavaScript(web, SHIM, setOf("*"))
+    // Android WebViews report env(safe-area-inset-top) as 0 even edge-to-edge; the embed
+    // takes the host's status-bar inset from --host-sat instead (iOS leaves it unset).
+    val sat = ctx.resources.getIdentifier("status_bar_height", "dimen", "android").let { id ->
+        if (id > 0) (ctx.resources.getDimensionPixelSize(id) / ctx.resources.displayMetrics.density).toInt() else 32
     }
+    val insetJs = "document.documentElement.style.setProperty('--host-sat','${sat}px');"
+    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+        WebViewCompat.addDocumentStartJavaScript(web, SHIM + "\n" + insetJs, setOf("*"))
+    }
+    ctl.insetJs = insetJs
     web.webViewClient = object : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
             // old WebView without document-start scripts: best effort, early as we can
-            if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) view.evaluateJavascript(SHIM, null)
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) view.evaluateJavascript(SHIM + ctl.insetJs, null)
         }
         override fun onPageFinished(view: WebView, url: String?) {
+            if (ctl.insetJs.isNotEmpty()) view.evaluateJavascript(ctl.insetJs, null)
             ctl.whenReady {
                 ctl.apply(); ctl.pushCapabilities(); ctl.refreshPending(); ctl.reassertStage()
             }

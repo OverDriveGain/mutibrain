@@ -37,6 +37,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -89,7 +90,13 @@ fun ScreenConsentHost() {
     }
     DisposableEffect(launcher) {
         val mpm = ctx.getSystemService(MediaProjectionManager::class.java)
-        ScreenConsent.request = { launcher.launch(mpm.createScreenCaptureIntent()) }
+        ScreenConsent.request = {
+            // whole-device memory (iOS broadcasts the entire screen): ask for the default
+            // display up front instead of Android 14's "share one app" default
+            launcher.launch(if (android.os.Build.VERSION.SDK_INT >= 34)
+                mpm.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
+            else mpm.createScreenCaptureIntent())
+        }
         onDispose { ScreenConsent.request = null }
     }
 }
@@ -149,12 +156,37 @@ fun ScreenpipeScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        // Samsung / One UI put background apps to sleep and kill long-running capture;
+        // the standard exemption keeps memory recording (no iOS equivalent needed there)
+        val pm = ctx.getSystemService(android.os.PowerManager::class.java)
+        var exempt by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+        val life = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        DisposableEffect(life) {
+            val o = androidx.lifecycle.LifecycleEventObserver { _, e ->
+                if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) exempt = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+            }
+            life.lifecycle.addObserver(o); onDispose { life.lifecycle.removeObserver(o) }
+        }
+        if (!exempt) Section("Keep recording in the background") {
+            Row(Modifier.fillMaxWidth().clickable {
+                runCatching {
+                    ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        android.net.Uri.parse("package:${ctx.packageName}")))
+                }
+            }, verticalAlignment = Alignment.CenterVertically) {
+                Text("Allow MyAgent to run in the background", color = Color.White, modifier = Modifier.weight(1f))
+                Icon(Icons.Filled.ChevronRight, null, tint = Muted)
+            }
+            Hint("Android's battery saver can stop screen and mic memory after a while. Allow it once and recording keeps going.")
+        }
+
         Section("Microphone") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // the whole row toggles, like an iOS Toggle row
+            Row(Modifier.fillMaxWidth().toggleable(value = micOn, role = androidx.compose.ui.semantics.Role.Switch) { on ->
+                if (on) MicCaptureService.userStart(ctx) else MicCaptureService.userStop(ctx)
+            }, verticalAlignment = Alignment.CenterVertically) {
                 Text("Record microphone", color = Color.White, modifier = Modifier.weight(1f))
-                Switch(checked = micOn, onCheckedChange = { on ->
-                    if (on) MicCaptureService.userStart(ctx) else MicCaptureService.userStop(ctx)
-                }, colors = SwitchDefaults.colors(checkedTrackColor = Accent))
+                Switch(checked = micOn, onCheckedChange = null, colors = SwitchDefaults.colors(checkedTrackColor = Accent))
             }
             StatusRow(if (micUp) Color(0xFF3DDC84) else Color.Gray,
                 if (micUp) "Uploading" else if (micOn) "Recording" else "Off", String.format("%.0f KB", kb))

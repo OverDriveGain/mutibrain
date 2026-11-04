@@ -42,7 +42,8 @@ object Net {
 object AppBuild {
     /** Platform-tagged so the server log tells the two apps apart. */
     val tag: String get() = "android-b${BuildConfig.VERSION_CODE}"
-    val header: String get() = "build ${BuildConfig.VERSION_CODE}"
+    /** "build 4 · 11-03 19:20" — Manar reads this to tell WHICH build is on the phone. */
+    val header: String get() = "build ${BuildConfig.VERSION_CODE}" + (if (BuildConfig.BUILD_DATE.isNotEmpty()) " · ${BuildConfig.BUILD_DATE}" else "")
 }
 
 /**
@@ -149,6 +150,41 @@ object CrashReporter {
 
     /** Heartbeat so a SIGKILL (low-memory killer / swipe) can be told apart on relaunch. */
     fun heartbeat() { runCatching { alive.writeText(System.currentTimeMillis().toString()) } }
+
+    /**
+     * Android tells us how the LAST process died (ApplicationExitInfo, API 30+): the
+     * counterpart of iOS's killed-uncatchable beacon, but with the real reason —
+     * low memory, ANR, a native crash, the user swiping it away, an update.
+     */
+    fun reportExitReason(ctx: Context) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return
+        val am = ctx.getSystemService(android.app.ActivityManager::class.java)
+        val last = runCatching { am.getHistoricalProcessExitReasons(ctx.packageName, 0, 1) }.getOrNull()?.firstOrNull() ?: return
+        val prefs = ctx.getSharedPreferences("myagent", Context.MODE_PRIVATE)
+        if (prefs.getLong("lastExitTs", 0) == last.timestamp) return   // already reported
+        prefs.edit().putLong("lastExitTs", last.timestamp).apply()
+        val why = when (last.reason) {
+            android.app.ApplicationExitInfo.REASON_LOW_MEMORY -> "lowmem"
+            android.app.ApplicationExitInfo.REASON_ANR -> "anr"
+            android.app.ApplicationExitInfo.REASON_CRASH -> "crash"
+            android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "native"
+            android.app.ApplicationExitInfo.REASON_USER_REQUESTED -> "user"
+            android.app.ApplicationExitInfo.REASON_USER_STOPPED -> "userstop"
+            android.app.ApplicationExitInfo.REASON_PACKAGE_UPDATED -> "update"
+            android.app.ApplicationExitInfo.REASON_SIGNALED -> "signal${last.status}"
+            android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "excessive"
+            android.app.ApplicationExitInfo.REASON_EXIT_SELF -> "self"
+            else -> "r${last.reason}"
+        }
+        val ago = (System.currentTimeMillis() - last.timestamp) / 1000
+        Beacon.send("exit-$why-${ago}s-ago-imp${last.importance}")
+        // routine exits (swipe, update, background cleanup) are noise; deaths are reports
+        if (why in setOf("lowmem", "anr", "native", "excessive") || why.startsWith("signal")) {
+            val trace = if (last.reason == android.app.ApplicationExitInfo.REASON_ANR)
+                runCatching { last.traceInputStream?.bufferedReader()?.readText()?.take(6000) }.getOrNull() else null
+            ReportClient.submit(kind = "crash", reason = "killed-$why ${last.description ?: ""}\n${trace ?: ""}")
+        }
+    }
 
     fun reportIfCrashed() {
         if (marker.exists()) {
