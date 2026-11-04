@@ -25,7 +25,7 @@ android {
         applicationId = "com.manarz.myagent"
         minSdk = 29          // MediaProjection foreground-service + AudioPlaybackCapture era
         targetSdk = 36
-        versionCode = 4
+        versionCode = 5
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // stamped at build time, shown in the home header (iOS MyMuBuildDate)
